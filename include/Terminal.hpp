@@ -42,6 +42,8 @@ private:
     bool m_vtEnabled{false};
     HANDLE m_hConsole{INVALID_HANDLE_VALUE};
     DWORD m_originalMode{0};
+    UINT m_originalCP{0};
+    UINT m_originalOutputCP{0};
 
     CommandParser m_parser;
 

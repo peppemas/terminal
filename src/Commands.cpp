@@ -79,6 +79,251 @@ LsOptions parseArgs(const commands::Args& args) {
     return opts;
 }
 
+// ------------------------------------------------------------------
+// tail helpers
+// ------------------------------------------------------------------
+
+enum class CountMode { Lines, Bytes };
+
+struct TailOptions {
+    CountMode mode = CountMode::Lines;
+    std::uintmax_t count = 10;
+    bool fromStart = false;
+    bool quiet = false;
+    bool verbose = false;
+    bool help = false;
+    bool conflict = false;
+    std::vector<std::string> files;
+};
+
+TailOptions parseTailArgs(const commands::Args& args) {
+    TailOptions opts;
+    for (std::size_t i = 1; i < args.size(); ++i) {
+        const std::string& token = args[i];
+        if (token == "--help") {
+            opts.help = true;
+            return opts;
+        }
+        if (token == "-q") {
+            opts.quiet = true;
+            continue;
+        }
+        if (token == "-v") {
+            opts.verbose = true;
+            continue;
+        }
+        if (token == "-n" || token == "--lines") {
+            if (i + 1 >= args.size()) {
+                std::cerr << "tail: option '" << token << "' requires an argument\n";
+                return opts;
+            }
+            const std::string& val = args[++i];
+            if (!val.empty() && val[0] == '+') {
+                try {
+                    opts.count = std::stoull(val.substr(1));
+                } catch (...) {
+                    std::cerr << "tail: invalid number: '" << val << "'\n";
+                    return opts;
+                }
+                opts.fromStart = true;
+            } else {
+                try {
+                    opts.count = std::stoull(val);
+                } catch (...) {
+                    std::cerr << "tail: invalid number: '" << val << "'\n";
+                    return opts;
+                }
+                opts.fromStart = false;
+            }
+            if (opts.mode == CountMode::Bytes) {
+                opts.conflict = true;
+            }
+            opts.mode = CountMode::Lines;
+            continue;
+        }
+        if (token.rfind("--lines=", 0) == 0) {
+            std::string val = token.substr(8);
+            if (val.empty()) {
+                std::cerr << "tail: option '--lines=' requires a value\n";
+                return opts;
+            }
+            if (!val.empty() && val[0] == '+') {
+                try {
+                    opts.count = std::stoull(val.substr(1));
+                } catch (...) {
+                    std::cerr << "tail: invalid number: '" << val << "'\n";
+                    return opts;
+                }
+                opts.fromStart = true;
+            } else {
+                try {
+                    opts.count = std::stoull(val);
+                } catch (...) {
+                    std::cerr << "tail: invalid number: '" << val << "'\n";
+                    return opts;
+                }
+                opts.fromStart = false;
+            }
+            if (opts.mode == CountMode::Bytes) {
+                opts.conflict = true;
+            }
+            opts.mode = CountMode::Lines;
+            continue;
+        }
+        if (token == "-c" || token == "--bytes") {
+            if (i + 1 >= args.size()) {
+                std::cerr << "tail: option '" << token << "' requires an argument\n";
+                return opts;
+            }
+            const std::string& val = args[++i];
+            try {
+                opts.count = std::stoull(val);
+            } catch (...) {
+                std::cerr << "tail: invalid number: '" << val << "'\n";
+                return opts;
+            }
+            if (opts.mode == CountMode::Lines) {
+                opts.conflict = true;
+            }
+            opts.mode = CountMode::Bytes;
+            continue;
+        }
+        if (token.rfind("--bytes=", 0) == 0) {
+            std::string val = token.substr(8);
+            if (val.empty()) {
+                std::cerr << "tail: option '--bytes=' requires a value\n";
+                return opts;
+            }
+            try {
+                opts.count = std::stoull(val);
+            } catch (...) {
+                std::cerr << "tail: invalid number: '" << val << "'\n";
+                return opts;
+            }
+            if (opts.mode == CountMode::Lines) {
+                opts.conflict = true;
+            }
+            opts.mode = CountMode::Bytes;
+            continue;
+        }
+        if (!token.empty() && token[0] == '-') {
+            std::cerr << "tail: invalid option: '" << token << "'\n";
+            continue;
+        }
+        opts.files.push_back(token);
+    }
+    return opts;
+}
+
+void printTailHelp() {
+    std::cout << "usage: tail [OPTION]... [FILE]...\n"
+              << "Print the last 10 lines of each FILE to standard output.\n"
+              << "With more than one FILE, precede each with a header giving the file name.\n\n"
+              << "  -n, --lines=NUM    output the last NUM lines (or +NUM lines from start)\n"
+              << "  -c, --bytes=NUM    output the last NUM bytes\n"
+              << "  -q                 never output headers giving file names\n"
+              << "  -v                 always output headers giving file names\n"
+              << "      --help         display this help and exit\n\n"
+              << "Examples:\n"
+              << "  tail file.txt            last 10 lines of file.txt\n"
+              << "  tail -n 5 file.txt       last 5 lines of file.txt\n"
+              << "  tail -n +15 file.txt     lines 15 through end of file.txt\n"
+              << "  tail -c 25 file.txt      last 25 bytes of file.txt\n"
+              << "  tail -q file1 file2      no headers, just concatenated tails\n";
+}
+
+bool shouldPrintHeader(std::size_t totalFiles, const TailOptions& opts) {
+    if (opts.quiet) return false;
+    if (opts.verbose) return true;
+    return totalFiles > 1;
+}
+
+void printTailHeader(const std::string& filename) {
+    std::cout << "==> " << filename << " <==\n";
+}
+
+void printTailBytes(const std::string& file, std::uintmax_t count) {
+    if (count == 0) {
+        return;
+    }
+    std::ifstream in(file, std::ios::binary);
+    if (!in.is_open()) {
+        return;
+    }
+    in.seekg(0, std::ios::end);
+    std::streamoff size = in.tellg();
+    if (size <= 0) {
+        return;
+    }
+    std::streamoff startPos = (size > static_cast<std::streamoff>(count)) ? size - static_cast<std::streamoff>(count) : 0;
+    in.seekg(startPos);
+    std::cout << in.rdbuf();
+}
+
+void printTailLinesBackward(const std::string& file, std::uintmax_t count) {
+    if (count == 0) {
+        return;
+    }
+    std::ifstream in(file, std::ios::binary);
+    if (!in.is_open()) {
+        return;
+    }
+    in.seekg(0, std::ios::end);
+    std::streamoff size = in.tellg();
+    if (size <= 0) {
+        return;
+    }
+
+    std::streamoff pos = size - 1;
+    in.seekg(pos);
+    char lastChar = 0;
+    in.read(&lastChar, 1);
+    if (lastChar == '\n') {
+        --pos;
+    }
+
+    std::uintmax_t foundCount = 0;
+    while (pos >= 0) {
+        in.seekg(pos);
+        char ch = 0;
+        in.read(&ch, 1);
+        if (ch == '\n') {
+            ++foundCount;
+            if (foundCount == count) {
+                break;
+            }
+        }
+        --pos;
+    }
+
+    std::streamoff startPos = (foundCount == count) ? pos + 1 : 0;
+    in.seekg(startPos);
+    in.clear();
+
+    std::string line;
+    while (std::getline(in, line)) {
+        std::cout << line << '\n';
+    }
+}
+
+void printTailLinesForward(const std::string& file, std::uintmax_t startLine) {
+    if (startLine == 0) {
+        return;
+    }
+    std::ifstream in(file);
+    if (!in.is_open()) {
+        return;
+    }
+    std::string line;
+    std::uintmax_t currentLine = 1;
+    while (std::getline(in, line)) {
+        if (currentLine >= startLine) {
+            std::cout << line << '\n';
+        }
+        ++currentLine;
+    }
+}
+
 bool isHidden(const fs::path& p) {
     std::string name = p.filename().string();
     return !name.empty() && name[0] == '.';
@@ -440,62 +685,39 @@ void commands::cat(const Args& args)
 
 void commands::tail(const Args& args)
 {
-    if (args.size() < 2) {
-        std::cerr << "usage: tail <file>\n";
+    TailOptions opts = parseTailArgs(args);
+    if (opts.help) {
+        printTailHelp();
+        return;
+    }
+    if (opts.files.empty()) {
+        std::cerr << "usage: tail [OPTION]… [FILE]…\n";
+        return;
+    }
+    if (opts.conflict) {
+        std::cerr << "tail: lines and bytes options are mutually exclusive\n";
         return;
     }
 
-    std::ifstream file(args[1], std::ios::binary);
-    if (!file.is_open()) {
-        std::cerr << "tail: cannot open '" << args[1] << "'\n";
-        return;
-    }
-
-    file.seekg(0, std::ios::end);
-    std::streamoff size = file.tellg();
-    if (size <= 0) {
-        return;
-    }
-
-    const int targetLines = 10;
-    std::streamoff pos = size - 1;
-
-    // If the file ends with a newline, ignore it for counting purposes
-    // because it terminates the last line rather than creating an empty one.
-    file.seekg(pos);
-    char lastChar = 0;
-    file.read(&lastChar, 1);
-    if (lastChar == '\n') {
-        --pos;
-    }
-
-    int newlineCount = 0;
-    while (pos >= 0) {
-        file.seekg(pos);
-        char ch = 0;
-        file.read(&ch, 1);
-        if (ch == '\n') {
-            ++newlineCount;
-            if (newlineCount == targetLines) {
-                break;
-            }
+    std::size_t totalFiles = opts.files.size();
+    for (const std::string& filename : opts.files) {
+        if (shouldPrintHeader(totalFiles, opts)) {
+            printTailHeader(filename);
         }
-        --pos;
-    }
+        std::ifstream test(filename, std::ios::binary);
+        if (!test.is_open()) {
+            std::cerr << "tail: cannot open '" << filename << "'\n";
+            continue;
+        }
+        test.close();
 
-    std::streamoff startPos = 0;
-    if (newlineCount == targetLines) {
-        startPos = pos + 1;
-    } else {
-        startPos = 0;
-    }
-
-    file.seekg(startPos);
-    file.clear();
-
-    std::string line;
-    while (std::getline(file, line)) {
-        std::cout << line << '\n';
+        if (opts.mode == CountMode::Bytes) {
+            printTailBytes(filename, opts.count);
+        } else if (opts.fromStart) {
+            printTailLinesForward(filename, opts.count);
+        } else {
+            printTailLinesBackward(filename, opts.count);
+        }
     }
 }
 

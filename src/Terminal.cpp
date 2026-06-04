@@ -13,6 +13,169 @@ static BOOL WINAPI ConsoleCtrlHandler(DWORD ctrlType) {
     return FALSE;
 }
 
+static std::string utf32ToUtf8(uint32_t cp)
+{
+    std::string result;
+    if (cp <= 0x7F) {
+        result.push_back(static_cast<char>(cp));
+    } else if (cp <= 0x7FF) {
+        result.push_back(static_cast<char>(0xC0 | ((cp >> 6) & 0x1F)));
+        result.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+    } else if (cp <= 0xFFFF) {
+        result.push_back(static_cast<char>(0xE0 | ((cp >> 12) & 0x0F)));
+        result.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+        result.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+    } else if (cp <= 0x10FFFF) {
+        result.push_back(static_cast<char>(0xF0 | ((cp >> 18) & 0x07)));
+        result.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
+        result.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+        result.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+    }
+    return result;
+}
+
+static uint32_t decodeUtf8(const std::string& s, size_t pos, size_t& outBytes)
+{
+    if (pos >= s.size()) {
+        outBytes = 0;
+        return 0;
+    }
+
+    unsigned char c0 = static_cast<unsigned char>(s[pos]);
+
+    if ((c0 & 0x80) == 0) {
+        outBytes = 1;
+        return c0;
+    }
+
+    size_t len = 0;
+    if ((c0 & 0xE0) == 0xC0) {
+        len = 2;
+    } else if ((c0 & 0xF0) == 0xE0) {
+        len = 3;
+    } else if ((c0 & 0xF8) == 0xF0) {
+        len = 4;
+    } else {
+        outBytes = 1;
+        return 0xFFFD;
+    }
+
+    if (pos + len > s.size()) {
+        outBytes = 1;
+        return 0xFFFD;
+    }
+
+    for (size_t i = 1; i < len; ++i) {
+        unsigned char ci = static_cast<unsigned char>(s[pos + i]);
+        if ((ci & 0xC0) != 0x80) {
+            outBytes = 1;
+            return 0xFFFD;
+        }
+    }
+
+    uint32_t cp = 0;
+    if (len == 2) {
+        cp = ((c0 & 0x1F) << 6) | (static_cast<unsigned char>(s[pos + 1]) & 0x3F);
+        if (cp < 0x80) {
+            outBytes = 1;
+            return 0xFFFD;
+        }
+    } else if (len == 3) {
+        cp = ((c0 & 0x0F) << 12) |
+             ((static_cast<unsigned char>(s[pos + 1]) & 0x3F) << 6) |
+             (static_cast<unsigned char>(s[pos + 2]) & 0x3F);
+        if (cp < 0x800) {
+            outBytes = 1;
+            return 0xFFFD;
+        }
+    } else if (len == 4) {
+        cp = ((c0 & 0x07) << 18) |
+             ((static_cast<unsigned char>(s[pos + 1]) & 0x3F) << 12) |
+             ((static_cast<unsigned char>(s[pos + 2]) & 0x3F) << 6) |
+             (static_cast<unsigned char>(s[pos + 3]) & 0x3F);
+        if (cp < 0x10000) {
+            outBytes = 1;
+            return 0xFFFD;
+        }
+    }
+
+    outBytes = len;
+    return cp;
+}
+
+static size_t prevUtf8Char(const std::string& s, size_t bytePos)
+{
+    if (bytePos == 0) {
+        return 0;
+    }
+    size_t pos = bytePos - 1;
+    while (pos > 0 && (static_cast<unsigned char>(s[pos]) & 0xC0) == 0x80) {
+        --pos;
+    }
+    return pos;
+}
+
+static size_t nextUtf8Char(const std::string& s, size_t bytePos)
+{
+    if (bytePos >= s.size()) {
+        return s.size();
+    }
+    size_t pos = bytePos + 1;
+    while (pos < s.size() && (static_cast<unsigned char>(s[pos]) & 0xC0) == 0x80) {
+        ++pos;
+    }
+    return pos;
+}
+
+static int codepointWidth(uint32_t cp)
+{
+    if (cp < 0x20 || cp == 0x7F) {
+        return 0;
+    }
+
+    if ((cp >= 0x1100 && cp <= 0x115F) ||
+        (cp >= 0x2E80 && cp <= 0x9FFF) ||
+        (cp >= 0xAC00 && cp <= 0xD7AF) ||
+        (cp >= 0xF900 && cp <= 0xFAFF) ||
+        (cp >= 0xFE30 && cp <= 0xFE6F) ||
+        (cp >= 0xFF00 && cp <= 0xFF60) ||
+        (cp >= 0xFFE0 && cp <= 0xFFE6)) {
+        return 2;
+    }
+
+    if ((cp >= 0x20000 && cp <= 0x2FFFD) ||
+        (cp >= 0x30000 && cp <= 0x3FFFD)) {
+        return 2;
+    }
+
+    if ((cp >= 0x2600 && cp <= 0x26FF) ||
+        (cp >= 0x2700 && cp <= 0x27BF) ||
+        (cp >= 0x1F300 && cp <= 0x1F9FF)) {
+        return 2;
+    }
+
+    return 1;
+}
+
+static size_t displayWidth(const std::string& s, size_t bytePos)
+{
+    size_t total = 0;
+    size_t pos = 0;
+    while (pos < bytePos && pos < s.size()) {
+        size_t consumed = 0;
+        uint32_t cp = decodeUtf8(s, pos, consumed);
+        if (consumed == 0) break;
+        total += static_cast<size_t>(codepointWidth(cp));
+        pos += consumed;
+    }
+    return total;
+}
+
+static size_t displayWidth(const std::string& s)
+{
+    return displayWidth(s, s.size());
+}
+
 Terminal::Terminal()
     : m_hConsole{INVALID_HANDLE_VALUE}, m_originalMode{0}, m_vtEnabled{false}
 {
@@ -32,6 +195,11 @@ Terminal::Terminal()
 
     SetConsoleCtrlHandler(ConsoleCtrlHandler, TRUE);
 
+    m_originalCP = GetConsoleCP();
+    m_originalOutputCP = GetConsoleOutputCP();
+    SetConsoleCP(CP_UTF8);
+    SetConsoleOutputCP(CP_UTF8);
+
     // Register all command handlers
     m_parser.registerCommand("ls",   commands::ls);
     m_parser.registerCommand("rm",   commands::rm);
@@ -49,6 +217,8 @@ Terminal::Terminal()
 
 Terminal::~Terminal()
 {
+    SetConsoleCP(m_originalCP);
+    SetConsoleOutputCP(m_originalOutputCP);
     SetConsoleCtrlHandler(ConsoleCtrlHandler, FALSE);
     restoreRawInput();
     if (m_hConsole != INVALID_HANDLE_VALUE) {
@@ -71,10 +241,18 @@ static std::string formatPromptPath(const std::string& raw)
     std::string leaf = raw.substr(sepPos); // includes separator
     std::size_t budget = maxLen - 3 - leaf.length();
     if (budget <= 0) {
-        return raw.substr(0, maxLen - 3) + "...";
+        std::size_t cut = maxLen - 3;
+        if (cut > 0 && (static_cast<unsigned char>(raw[cut]) & 0xC0) == 0x80) {
+            cut = prevUtf8Char(raw, cut);
+        }
+        return raw.substr(0, cut) + "...";
     }
 
-    return raw.substr(0, budget) + "..." + leaf;
+    std::size_t cut = budget;
+    if (cut > 0 && (static_cast<unsigned char>(raw[cut]) & 0xC0) == 0x80) {
+        cut = prevUtf8Char(raw, cut);
+    }
+    return raw.substr(0, cut) + "..." + leaf;
 }
 
 std::string Terminal::printPrompt() const
@@ -123,7 +301,10 @@ void Terminal::refreshLine() const
     std::cout << "\r\x1b[K";
     const std::string prompt = printPrompt();
     std::cout << m_inputBuffer;
-    std::cout << "\x1b[" << (prompt.length() + m_cursorPos + 1) << "G";
+    size_t col = 1
+               + displayWidth(prompt)
+               + displayWidth(m_inputBuffer, m_cursorPos);
+    std::cout << "\x1b[" << col << "G";
     std::cout.flush();
 }
 
@@ -135,6 +316,7 @@ std::string Terminal::readLineRaw()
 
     INPUT_RECORD record;
     DWORD count = 0;
+    WCHAR pendingHigh = 0;
 
     while (true) {
         if (!ReadConsoleInput(m_hInput, &record, 1, &count)) {
@@ -147,7 +329,7 @@ std::string Terminal::readLineRaw()
         }
 
         WORD vk = record.Event.KeyEvent.wVirtualKeyCode;
-        CHAR ch = record.Event.KeyEvent.uChar.AsciiChar;
+        WCHAR wc = record.Event.KeyEvent.uChar.UnicodeChar;
 
         if (vk == VK_RETURN) {
             m_inHistoryRecall = false;
@@ -158,8 +340,9 @@ std::string Terminal::readLineRaw()
 
         if (vk == VK_BACK) {
             if (!m_inputBuffer.empty()) {
-                m_inputBuffer.pop_back();
-                --m_cursorPos;
+                size_t prev = prevUtf8Char(m_inputBuffer, m_inputBuffer.size());
+                m_inputBuffer.erase(prev);
+                m_cursorPos = prev;
                 m_lastWasTab = false;
                 refreshLine();
             }
@@ -204,9 +387,46 @@ std::string Terminal::readLineRaw()
             continue;
         }
 
-        if (ch >= 32 && ch <= 126) {
-            m_inputBuffer.push_back(ch);
-            ++m_cursorPos;
+        if (vk == VK_LEFT) {
+            if (m_cursorPos > 0) {
+                m_cursorPos = prevUtf8Char(m_inputBuffer, m_cursorPos);
+                refreshLine();
+            }
+            continue;
+        }
+
+        if (vk == VK_RIGHT) {
+            if (m_cursorPos < m_inputBuffer.size()) {
+                m_cursorPos = nextUtf8Char(m_inputBuffer, m_cursorPos);
+                refreshLine();
+            }
+            continue;
+        }
+
+        if (wc >= 0xD800 && wc <= 0xDBFF) {
+            pendingHigh = wc;
+            continue;
+        }
+
+        if (wc >= 0xDC00 && wc <= 0xDFFF) {
+            if (pendingHigh != 0) {
+                uint32_t cp = 0x10000 + ((pendingHigh - 0xD800) << 10) + (wc - 0xDC00);
+                std::string utf8 = utf32ToUtf8(cp);
+                m_inputBuffer += utf8;
+                m_cursorPos += utf8.length();
+                m_lastWasTab = false;
+                refreshLine();
+            }
+            pendingHigh = 0;
+            continue;
+        }
+
+        pendingHigh = 0;
+
+        if (wc != L'\0') {
+            std::string utf8 = utf32ToUtf8(static_cast<uint32_t>(wc));
+            m_inputBuffer += utf8;
+            m_cursorPos += utf8.length();
             m_lastWasTab = false;
             refreshLine();
         }
