@@ -216,8 +216,8 @@ TailOptions parseTailArgs(const commands::Args& args) {
     return opts;
 }
 
-void printTailHelp() {
-    std::cout << "usage: tail [OPTION]... [FILE]...\n"
+void printTailHelp(std::ostream& out) {
+    out << "usage: tail [OPTION]... [FILE]...\n"
               << "Print the last 10 lines of each FILE to standard output.\n"
               << "With more than one FILE, precede each with a header giving the file name.\n\n"
               << "  -n, --lines=NUM    output the last NUM lines (or +NUM lines from start)\n"
@@ -239,11 +239,11 @@ bool shouldPrintHeader(std::size_t totalFiles, const TailOptions& opts) {
     return totalFiles > 1;
 }
 
-void printTailHeader(const std::string& filename) {
-    std::cout << "==> " << filename << " <==\n";
+void printTailHeader(const std::string& filename, std::ostream& out) {
+    out << "==> " << filename << " <==\n";
 }
 
-void printTailBytes(const std::string& file, std::uintmax_t count) {
+void printTailBytes(const std::string& file, std::uintmax_t count, std::ostream& out) {
     if (count == 0) {
         return;
     }
@@ -258,10 +258,10 @@ void printTailBytes(const std::string& file, std::uintmax_t count) {
     }
     std::streamoff startPos = (size > static_cast<std::streamoff>(count)) ? size - static_cast<std::streamoff>(count) : 0;
     in.seekg(startPos);
-    std::cout << in.rdbuf();
+    out << in.rdbuf();
 }
 
-void printTailLinesBackward(const std::string& file, std::uintmax_t count) {
+void printTailLinesBackward(const std::string& file, std::uintmax_t count, std::ostream& out) {
     if (count == 0) {
         return;
     }
@@ -303,11 +303,11 @@ void printTailLinesBackward(const std::string& file, std::uintmax_t count) {
 
     std::string line;
     while (std::getline(in, line)) {
-        std::cout << line << '\n';
+        out << line << '\n';
     }
 }
 
-void printTailLinesForward(const std::string& file, std::uintmax_t startLine) {
+void printTailLinesForward(const std::string& file, std::uintmax_t startLine, std::ostream& out) {
     if (startLine == 0) {
         return;
     }
@@ -319,7 +319,7 @@ void printTailLinesForward(const std::string& file, std::uintmax_t startLine) {
     std::uintmax_t currentLine = 1;
     while (std::getline(in, line)) {
         if (currentLine >= startLine) {
-            std::cout << line << '\n';
+            out << line << '\n';
         }
         ++currentLine;
     }
@@ -474,7 +474,8 @@ void sortEntries(std::vector<DirEntry>& entries, const LsOptions& opts) {
 }
 
 void printEntries(const std::vector<DirEntry>& entries, const LsOptions& opts,
-                  std::size_t linkWidth, std::size_t ownerWidth, std::size_t sizeWidth) {
+                  std::size_t linkWidth, std::size_t ownerWidth, std::size_t sizeWidth,
+                  std::ostream& out) {
     if (entries.empty()) {
         return;
     }
@@ -491,29 +492,29 @@ void printEntries(const std::vector<DirEntry>& entries, const LsOptions& opts,
             std::time_t t = std::chrono::system_clock::to_time_t(sctp);
             std::tm* tm = std::localtime(&t);
 
-            std::cout << std::left << std::setw(10) << perm << ' '
+            out << std::left << std::setw(10) << perm << ' '
                       << std::right << std::setw(static_cast<int>(linkWidth)) << e.nlink << ' '
                       << std::left << std::setw(static_cast<int>(ownerWidth)) << e.owner << ' '
                       << std::right << std::setw(static_cast<int>(sizeWidth)) << sizeStr << ' ';
 
             if (tm) {
-                std::cout << std::put_time(tm, "%b %d %H:%M") << ' ';
+                out << std::put_time(tm, "%b %d %H:%M") << ' ';
             } else {
-                std::cout << "??? ?? ??:?? ";
+                out << "??? ?? ??:?? ";
             }
 
-            std::cout << colorFor(e) << e.path.filename().string() << commands::RESET << '\n';
+            out << colorFor(e) << e.path.filename().string() << commands::RESET << '\n';
         }
     } else {
         for (const auto& e : entries) {
-            std::cout << colorFor(e) << e.path.filename().string() << commands::RESET << '\n';
+            out << colorFor(e) << e.path.filename().string() << commands::RESET << '\n';
         }
     }
 }
 
-std::vector<DirEntry> listDirectory(const fs::path& dir, const LsOptions& opts, bool printHeader) {
+std::vector<DirEntry> listDirectory(const fs::path& dir, const LsOptions& opts, bool printHeader, std::ostream& out) {
     if (printHeader) {
-        std::cout << dir.string() << ":\n";
+        out << dir.string() << ":\n";
     }
 
     std::vector<DirEntry> entries;
@@ -557,16 +558,16 @@ std::vector<DirEntry> listDirectory(const fs::path& dir, const LsOptions& opts, 
         }
     }
 
-    printEntries(entries, opts, linkWidth, ownerWidth, sizeWidth);
+    printEntries(entries, opts, linkWidth, ownerWidth, sizeWidth, out);
     return entries;
 }
 
-void lsRecursive(const fs::path& dir, const LsOptions& opts) {
-    auto entries = listDirectory(dir, opts, true);
+void lsRecursive(const fs::path& dir, const LsOptions& opts, std::ostream& out) {
+    auto entries = listDirectory(dir, opts, true, out);
     for (const auto& e : entries) {
         if (fs::is_directory(e.status)) {
             try {
-                lsRecursive(e.path, opts);
+                lsRecursive(e.path, opts, out);
             } catch (const fs::filesystem_error& err) {
                 std::cerr << "ls: cannot access '" << e.path.string() << "': " << err.what() << '\n';
             }
@@ -574,8 +575,8 @@ void lsRecursive(const fs::path& dir, const LsOptions& opts) {
     }
 }
 
-void printHelp() {
-    std::cout << "usage: ls [options] [path...]\n"
+void printHelp(std::ostream& out) {
+    out << "usage: ls [options] [path...]\n"
               << "  -a    include hidden entries\n"
               << "  -l    long listing format\n"
               << "  -h    human-readable sizes (with -l)\n"
@@ -587,20 +588,20 @@ void printHelp() {
 
 } // anonymous namespace
 
-void commands::ls(const Args& args)
+void commands::ls(const Args& args, std::ostream& out, std::istream& /*in*/)
 {
     auto opts = parseArgs(args);
     if (opts.help) {
-        printHelp();
+        printHelp(out);
         return;
     }
 
     for (const auto& target : opts.paths) {
         try {
             if (opts.recursive && fs::is_directory(target)) {
-                lsRecursive(target, opts);
+                lsRecursive(target, opts, out);
             } else {
-                listDirectory(target, opts, opts.paths.size() > 1);
+                listDirectory(target, opts, opts.paths.size() > 1, out);
             }
         } catch (const fs::filesystem_error& e) {
             std::cerr << "ls: cannot access '" << target.string() << "': " << e.what() << '\n';
@@ -608,7 +609,7 @@ void commands::ls(const Args& args)
     }
 }
 
-void commands::rm(const Args& args)
+void commands::rm(const Args& args, std::ostream& out, std::istream& /*in*/)
 {
     if (args.size() < 2) {
         std::cerr << "usage: rm [-r] <path>\n";
@@ -629,7 +630,7 @@ void commands::rm(const Args& args)
     try {
         if (recursive) {
             std::uintmax_t n = fs::remove_all(args[pathIndex]);
-            std::cout << "removed " << n << " items\n";
+            out << "removed " << n << " items\n";
         } else {
             if (!fs::remove(args[pathIndex])) {
                 std::cerr << "rm: failed to remove '" << args[pathIndex] << "'\n";
@@ -640,7 +641,7 @@ void commands::rm(const Args& args)
     }
 }
 
-void commands::cp(const Args& args)
+void commands::cp(const Args& args, std::ostream& /*out*/, std::istream& /*in*/)
 {
     if (args.size() < 3) {
         std::cerr << "usage: cp <source> <destination>\n";
@@ -654,7 +655,7 @@ void commands::cp(const Args& args)
     }
 }
 
-void commands::mv(const Args& args)
+void commands::mv(const Args& args, std::ostream& /*out*/, std::istream& /*in*/)
 {
     if (args.size() < 3) {
         std::cerr << "usage: mv <source> <destination>\n";
@@ -668,14 +669,14 @@ void commands::mv(const Args& args)
     }
 }
 
-void commands::cat(const Args& args)
+void commands::cat(const Args& args, std::ostream& out, std::istream& /*in*/)
 {
     // --help
     for (std::size_t i = 1; i < args.size(); ++i) {
         if (args[i] == "--help") {
-            std::cout << "usage: cat [file...]\n"
-                      << "  Concatenate files to standard output.\n"
-                      << "  Limits: regular files only, max 10 MiB streamed, Ctrl+C to abort.\n";
+            out << "usage: cat [file...]\n"
+                << "  Concatenate files to standard output.\n"
+                << "  Limits: regular files only, max 10 MiB streamed, Ctrl+C to abort.\n";
             return;
         }
     }
@@ -729,7 +730,7 @@ void commands::cat(const Args& args)
             file.read(buf.data(), static_cast<std::streamsize>(buf.size()));
             std::streamsize got = file.gcount();
             if (got > 0) {
-                std::cout.write(buf.data(), got);
+                out.write(buf.data(), got);
                 totalWritten += static_cast<std::size_t>(got);
                 if (totalWritten > MAX_TOTAL) {
                     std::cerr << "cat: output truncated at 10 MiB; use a pager\n";
@@ -742,7 +743,7 @@ void commands::cat(const Args& args)
                 break;
             }
             if (pollCtrlC()) {
-                std::cout << "^C\n";
+                out << "^C\n";
                 aborted = true;
                 break;
             }
@@ -752,11 +753,11 @@ void commands::cat(const Args& args)
     }
 }
 
-void commands::tail(const Args& args)
+void commands::tail(const Args& args, std::ostream& out, std::istream& /*in*/)
 {
     TailOptions opts = parseTailArgs(args);
     if (opts.help) {
-        printTailHelp();
+        printTailHelp(out);
         return;
     }
     if (opts.files.empty()) {
@@ -771,7 +772,7 @@ void commands::tail(const Args& args)
     std::size_t totalFiles = opts.files.size();
     for (const std::string& filename : opts.files) {
         if (shouldPrintHeader(totalFiles, opts)) {
-            printTailHeader(filename);
+            printTailHeader(filename, out);
         }
         std::ifstream test(filename, std::ios::binary);
         if (!test.is_open()) {
@@ -781,19 +782,19 @@ void commands::tail(const Args& args)
         test.close();
 
         if (opts.mode == CountMode::Bytes) {
-            printTailBytes(filename, opts.count);
+            printTailBytes(filename, opts.count, out);
         } else if (opts.fromStart) {
-            printTailLinesForward(filename, opts.count);
+            printTailLinesForward(filename, opts.count, out);
         } else {
-            printTailLinesBackward(filename, opts.count);
+            printTailLinesBackward(filename, opts.count, out);
         }
     }
 }
 
-void commands::grep(const Args& args)
+void commands::grep(const Args& args, std::ostream& out, std::istream& in)
 {
-    if (args.size() < 3) {
-        std::cerr << "usage: grep <pattern> <file>\n";
+    if (args.size() < 2) {
+        std::cerr << "usage: grep <pattern> [file]\n";
         return;
     }
 
@@ -805,14 +806,19 @@ void commands::grep(const Args& args)
         return;
     }
 
-    std::ifstream file(args[2]);
-    if (!file.is_open()) {
-        std::cerr << "grep: cannot open '" << args[2] << "'\n";
-        return;
+    std::ifstream file;
+    std::istream* input = &in;
+    if (args.size() >= 3) {
+        file.open(args[2]);
+        if (!file.is_open()) {
+            std::cerr << "grep: cannot open '" << args[2] << "'\n";
+            return;
+        }
+        input = &file;
     }
 
     std::string line;
-    while (std::getline(file, line)) {
+    while (std::getline(*input, line)) {
         std::string output;
         std::string::const_iterator searchStart(line.cbegin());
         std::smatch match;
@@ -829,12 +835,12 @@ void commands::grep(const Args& args)
 
         if (found) {
             output.append(searchStart, line.cend());
-            std::cout << output << '\n';
+            out << output << '\n';
         }
     }
 }
 
-void commands::cd(const Args& args)
+void commands::cd(const Args& args, std::ostream& /*out*/, std::istream& /*in*/)
 {
     if (args.size() < 2) {
         std::cerr << "usage: cd <path>\n";
@@ -854,18 +860,18 @@ void commands::cd(const Args& args)
     }
 }
 
-void commands::clear(const Args& /*args*/)
+void commands::clear(const Args& /*args*/, std::ostream& out, std::istream& /*in*/)
 {
     // Clear screen, clear scrollback, and move cursor to home (cross-platform ANSI)
-    std::cout << "\x1b[2J\x1b[3J\x1b[H" << std::flush;
+    out << "\x1b[2J\x1b[3J\x1b[H" << std::flush;
 }
 
-void commands::pwd(const Args& /*args*/)
+void commands::pwd(const Args& /*args*/, std::ostream& out, std::istream& /*in*/)
 {
-    std::cout << std::filesystem::current_path().string() << '\n';
+    out << std::filesystem::current_path().string() << '\n';
 }
 
-void commands::open(const Args& args)
+void commands::open(const Args& args, std::ostream& /*out*/, std::istream& /*in*/)
 {
     if (args.size() < 2) {
         std::cerr << commands::RED << "open: missing directory operand\n" << commands::RESET;
@@ -896,4 +902,13 @@ void commands::open(const Args& args)
     if (reinterpret_cast<intptr_t>(result) <= 32) {
         std::cerr << commands::RED << "open: failed to launch file explorer\n" << commands::RESET;
     }
+}
+
+void commands::echo(const Args& args, std::ostream& out, std::istream& /*in*/)
+{
+    for (std::size_t i = 1; i < args.size(); ++i) {
+        if (i > 1) out << ' ';
+        out << args[i];
+    }
+    out << '\n';
 }

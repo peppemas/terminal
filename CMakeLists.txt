@@ -9,6 +9,7 @@ add_executable(terminal
     src/CommandParser.cpp
     src/Commands.cpp
     src/ForegroundJob.cpp
+    src/ShellTokenizer.cpp
 )
 
 target_include_directories(terminal PUBLIC include)

@@ -201,18 +201,24 @@ Terminal::Terminal()
     SetConsoleOutputCP(CP_UTF8);
 
     // Register all command handlers
-    m_parser.registerCommand("ls",   commands::ls);
-    m_parser.registerCommand("rm",   commands::rm);
-    m_parser.registerCommand("cp",   commands::cp);
-    m_parser.registerCommand("mv",   commands::mv);
-    m_parser.registerCommand("cat",  commands::cat);
-    m_parser.registerCommand("tail", commands::tail);
-    m_parser.registerCommand("grep", commands::grep);
-    m_parser.registerCommand("cd",   commands::cd);
-    m_parser.registerCommand("clear", commands::clear);
-    m_parser.registerCommand("cls",   commands::clear);
-    m_parser.registerCommand("pwd",   commands::pwd);
-    m_parser.registerCommand("open",  commands::open);
+    m_parser.registerCommand("ls",   [](const commands::Args& a) { commands::ls(a); });
+    m_parser.registerCommand("rm",   [](const commands::Args& a) { commands::rm(a); });
+    m_parser.registerCommand("cp",   [](const commands::Args& a) { commands::cp(a); });
+    m_parser.registerCommand("mv",   [](const commands::Args& a) { commands::mv(a); });
+    m_parser.registerCommand("cat",  [](const commands::Args& a) { commands::cat(a); });
+    m_parser.registerCommand("tail", [](const commands::Args& a) { commands::tail(a); });
+    m_parser.registerCommand("grep", [](const commands::Args& a) { commands::grep(a); });
+    m_parser.registerCommand("cd",   [](const commands::Args& a) { commands::cd(a); });
+    m_parser.registerCommand("clear",[](const commands::Args& a) { commands::clear(a); });
+    m_parser.registerCommand("cls",  [](const commands::Args& a) { commands::clear(a); });
+    m_parser.registerCommand("pwd",  [](const commands::Args& a) { commands::pwd(a); });
+    m_parser.registerCommand("open", [](const commands::Args& a) { commands::open(a); });
+    m_parser.registerCommand("echo", [](const commands::Args& a) { commands::echo(a); });
+
+    m_parser.registerPipelineCommand("cat",  [](const commands::Args& a, std::ostream& out, std::istream& in) { commands::cat(a, out, in); });
+    m_parser.registerPipelineCommand("grep", [](const commands::Args& a, std::ostream& out, std::istream& in) { commands::grep(a, out, in); });
+    m_parser.registerPipelineCommand("tail", [](const commands::Args& a, std::ostream& out, std::istream& in) { commands::tail(a, out, in); });
+    m_parser.registerPipelineCommand("echo", [](const commands::Args& a, std::ostream& out, std::istream& in) { commands::echo(a, out, in); });
 }
 
 Terminal::~Terminal()

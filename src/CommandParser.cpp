@@ -1,5 +1,6 @@
 #include "CommandParser.hpp"
 
+#include "ShellTokenizer.hpp"
 #include <iostream>
 #include <sstream>
 
@@ -8,43 +9,102 @@ void CommandParser::registerCommand(const std::string& name, Handler handler)
     m_registry[name] = std::move(handler);
 }
 
-void CommandParser::execute(const std::string& line) const
+void CommandParser::registerPipelineCommand(const std::string& name, PipelineHandler handler)
+{
+    m_pipelineRegistry[name] = std::move(handler);
+}
+
+bool CommandParser::executePipeline(const std::string& line, std::istream& in, std::ostream& out) const
 {
     if (line.empty()) {
-        return;
+        return true;
     }
 
-    std::istringstream iss(line);
-    Args args;
-    std::string token;
-    while (iss >> token) {
-        args.push_back(token);
+    auto stages = shell::tokenizePipeline(line);
+    if (stages.empty()) {
+        return true;
     }
 
-    if (args.empty()) {
-        return;
+    std::string previousOutput;
+    bool hasPrevious = false;
+
+    for (std::size_t s = 0; s < stages.size(); ++s) {
+        const auto& argv = stages[s];
+        if (argv.empty()) {
+            std::cerr << "syntax error: empty pipeline stage\n";
+            return false;
+        }
+
+        const std::string& cmd = argv[0];
+
+        std::istringstream prevStream(previousOutput);
+        std::istream* stageIn = hasPrevious ? static_cast<std::istream*>(&prevStream) : &in;
+
+        std::ostringstream nextStream;
+        std::ostream* stageOut = (s + 1 == stages.size()) ? &out : static_cast<std::ostream*>(&nextStream);
+
+        auto pIt = m_pipelineRegistry.find(cmd);
+        if (pIt != m_pipelineRegistry.end()) {
+            pIt->second(argv, *stageOut, *stageIn);
+        } else {
+            auto lIt = m_registry.find(cmd);
+            if (lIt != m_registry.end()) {
+                lIt->second(argv);
+            } else {
+                std::cerr << "command not found: " << cmd << '\n';
+                return false;
+            }
+        }
+
+        previousOutput = nextStream.str();
+        hasPrevious = true;
     }
 
-    const std::string& cmd = args[0];
-    auto it = m_registry.find(cmd);
-    if (it != m_registry.end()) {
-        it->second(args);
-    } else {
-        std::cerr << "command not found: " << cmd << '\n';
+    return true;
+}
+
+bool CommandParser::execute(const std::string& line, std::istream& in, std::ostream& out) const
+{
+    if (line.empty()) {
+        return true;
+    }
+    return executePipeline(line, in, out);
+}
+
+bool CommandParser::execute(const std::string& line, std::ostream& out) const
+{
+    return execute(line, std::cin, out);
+}
+
+void CommandParser::execute(const std::string& line) const
+{
+    if (!execute(line, std::cin, std::cout)) {
+        std::istringstream iss(line);
+        std::string cmd;
+        if (iss >> cmd) {
+            std::cerr << "command not found: " << cmd << '\n';
+        }
     }
 }
 
 bool CommandParser::hasCommand(const std::string& name) const
 {
-    return m_registry.find(name) != m_registry.end();
+    return m_registry.find(name) != m_registry.end() ||
+           m_pipelineRegistry.find(name) != m_pipelineRegistry.end();
 }
 
 std::vector<std::string> CommandParser::getRegisteredCommands() const
 {
     std::vector<std::string> commands;
-    commands.reserve(m_registry.size());
+    commands.reserve(m_registry.size() + m_pipelineRegistry.size());
     for (const auto& pair : m_registry) {
         commands.push_back(pair.first);
+    }
+    for (const auto& pair : m_pipelineRegistry) {
+        const std::string& name = pair.first;
+        if (m_registry.find(name) == m_registry.end()) {
+            commands.push_back(name);
+        }
     }
     return commands;
 }

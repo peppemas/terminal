@@ -5,6 +5,7 @@
 
 #include <string>
 #include <vector>
+#include <iostream>
 
 namespace commands {
 
@@ -17,17 +18,32 @@ namespace commands {
     inline constexpr const char* CYAN       = "\x1b[36m";
     inline constexpr const char* MAGENTA    = "\x1b[35m";
 
-    void ls  (const Args& args);
-    void rm  (const Args& args);
-    void cp  (const Args& args);
-    void mv  (const Args& args);
-    void cat (const Args& args);
-    void tail(const Args& args);
-    void grep(const Args& args);
-    void cd  (const Args& args);
-    void clear(const Args& args);
-    void pwd(const Args& args);
-    void open(const Args& args);
+    void ls  (const Args& args, std::ostream& out, std::istream& in);
+    void rm  (const Args& args, std::ostream& out, std::istream& in);
+    void cp  (const Args& args, std::ostream& out, std::istream& in);
+    void mv  (const Args& args, std::ostream& out, std::istream& in);
+    void cat (const Args& args, std::ostream& out, std::istream& in);
+    void tail(const Args& args, std::ostream& out, std::istream& in);
+    void grep(const Args& args, std::ostream& out, std::istream& in);
+    void cd  (const Args& args, std::ostream& out, std::istream& in);
+    void clear(const Args& args, std::ostream& out, std::istream& in);
+    void pwd(const Args& args, std::ostream& out, std::istream& in);
+    void open(const Args& args, std::ostream& out, std::istream& in);
+    void echo(const Args& args, std::ostream& out, std::istream& in);
+
+    // Legacy backward-compatible wrappers
+    inline void ls  (const Args& args) { ls(args, std::cout, std::cin); }
+    inline void rm  (const Args& args) { rm(args, std::cout, std::cin); }
+    inline void cp  (const Args& args) { cp(args, std::cout, std::cin); }
+    inline void mv  (const Args& args) { mv(args, std::cout, std::cin); }
+    inline void cat (const Args& args) { cat(args, std::cout, std::cin); }
+    inline void tail(const Args& args) { tail(args, std::cout, std::cin); }
+    inline void grep(const Args& args) { grep(args, std::cout, std::cin); }
+    inline void cd  (const Args& args) { cd(args, std::cout, std::cin); }
+    inline void clear(const Args& args) { clear(args, std::cout, std::cin); }
+    inline void pwd(const Args& args) { pwd(args, std::cout, std::cin); }
+    inline void open(const Args& args) { open(args, std::cout, std::cin); }
+    inline void echo(const Args& args) { echo(args, std::cout, std::cin); }
 
 } // namespace commands
 
