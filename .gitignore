@@ -1,4 +1,5 @@
 cmake-build-debug
 .rocket
+.idea
 build
 coder.log

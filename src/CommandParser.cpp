@@ -34,6 +34,11 @@ void CommandParser::execute(const std::string& line) const
     }
 }
 
+bool CommandParser::hasCommand(const std::string& name) const
+{
+    return m_registry.find(name) != m_registry.end();
+}
+
 std::vector<std::string> CommandParser::getRegisteredCommands() const
 {
     std::vector<std::string> commands;

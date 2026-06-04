@@ -3,6 +3,15 @@
 
 #include <iostream>
 #include <filesystem>
+#include <sstream>
+#include <vector>
+
+static BOOL WINAPI ConsoleCtrlHandler(DWORD ctrlType) {
+    if (ctrlType == CTRL_C_EVENT) {
+        return TRUE; // swallow the signal so the shell never terminates
+    }
+    return FALSE;
+}
 
 Terminal::Terminal()
     : m_hConsole{INVALID_HANDLE_VALUE}, m_originalMode{0}, m_vtEnabled{false}
@@ -21,6 +30,8 @@ Terminal::Terminal()
         m_vtEnabled = true;
     }
 
+    SetConsoleCtrlHandler(ConsoleCtrlHandler, TRUE);
+
     // Register all command handlers
     m_parser.registerCommand("ls",   commands::ls);
     m_parser.registerCommand("rm",   commands::rm);
@@ -38,6 +49,7 @@ Terminal::Terminal()
 
 Terminal::~Terminal()
 {
+    SetConsoleCtrlHandler(ConsoleCtrlHandler, FALSE);
     restoreRawInput();
     if (m_hConsole != INVALID_HANDLE_VALUE) {
         SetConsoleMode(m_hConsole, m_originalMode);
@@ -90,8 +102,7 @@ bool Terminal::setupRawInput()
     }
 
     DWORD newMode = m_originalInputMode;
-    newMode &= ~(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT);
-    newMode |= ENABLE_PROCESSED_INPUT;
+    newMode &= ~(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT | ENABLE_PROCESSED_INPUT);
 
     if (!SetConsoleMode(m_hInput, newMode)) {
         return false;
@@ -161,6 +172,13 @@ std::string Terminal::readLineRaw()
         }
 
         bool ctrl = (record.Event.KeyEvent.dwControlKeyState & (LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED)) != 0;
+
+        if (vk == 'C' && ctrl) {
+            std::cout << "^C\n";
+            m_inputBuffer.clear();
+            m_cursorPos = 0;
+            return std::string(1, kCtrlCSentinel);
+        }
 
         if (vk == VK_UP) {
             if (!m_history.empty()) {
@@ -370,6 +388,33 @@ void Terminal::moveCursorToNextSpace()
     refreshLine();
 }
 
+void Terminal::waitForForegroundJob()
+{
+    while (m_fgJob.isActive()) {
+        DWORD wait = WaitForSingleObject(m_fgJob.hProcess, 100);
+        if (wait == WAIT_OBJECT_0) {
+            m_fgJob.reset();
+            break;
+        }
+
+        INPUT_RECORD rec;
+        DWORD count = 0;
+        if (!PeekConsoleInput(m_hInput, &rec, 1, &count) || count == 0) {
+            continue;
+        }
+
+        if (rec.EventType == KEY_EVENT && rec.Event.KeyEvent.bKeyDown) {
+            WORD vk = rec.Event.KeyEvent.wVirtualKeyCode;
+            bool ctrl = (rec.Event.KeyEvent.dwControlKeyState & (LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED)) != 0;
+            if (vk == 'C' && ctrl) {
+                ReadConsoleInput(m_hInput, &rec, 1, &count);
+                std::cout << "^C\n";
+                m_fgJob.interrupt();
+            }
+        }
+    }
+}
+
 void Terminal::run()
 {
     bool raw = setupRawInput();
@@ -377,18 +422,43 @@ void Terminal::run()
         while (true) {
             printPrompt();
             std::string line = readLineRaw();
+            if (line == std::string(1, kCtrlCSentinel)) {
+                continue;
+            }
             if (!line.empty()) {
                 addToHistory(line);
             }
 
-            if (line == "exit" || line == "quit") {
+            std::istringstream iss(line);
+            std::string firstToken;
+            if (!(iss >> firstToken)) {
+                continue;
+            }
+
+            if (firstToken == "exit" || firstToken == "quit") {
                 break;
             }
 
-            try {
-                m_parser.execute(line);
-            } catch (const std::exception& e) {
-                std::cerr << "error: " << e.what() << '\n';
+            if (m_parser.hasCommand(firstToken)) {
+                try {
+                    m_parser.execute(line);
+                } catch (const std::exception& e) {
+                    std::cerr << "error: " << e.what() << '\n';
+                }
+            } else {
+                int wlen = MultiByteToWideChar(CP_UTF8, 0, line.data(), static_cast<int>(line.size()), nullptr, 0);
+                if (wlen > 0) {
+                    std::vector<wchar_t> wbuf(wlen + 1, L'\0');
+                    MultiByteToWideChar(CP_UTF8, 0, line.data(), static_cast<int>(line.size()), wbuf.data(), wlen);
+                    std::wstring wline(wbuf.data());
+                    if (m_fgJob.start(wline)) {
+                        waitForForegroundJob();
+                    } else {
+                        std::cerr << "command not found: " << firstToken << '\n';
+                    }
+                } else {
+                    std::cerr << "command not found: " << firstToken << '\n';
+                }
             }
         }
         restoreRawInput();

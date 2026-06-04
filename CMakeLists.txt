@@ -8,6 +8,7 @@ add_executable(terminal
     src/Terminal.cpp
     src/CommandParser.cpp
     src/Commands.cpp
+    src/ForegroundJob.cpp
 )
 
 target_include_directories(terminal PUBLIC include)

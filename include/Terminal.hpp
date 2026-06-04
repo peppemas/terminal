@@ -10,6 +10,7 @@
 #include <unordered_map>
 
 #include "CommandParser.hpp"
+#include "ForegroundJob.hpp"
 
 class Terminal {
 public:
@@ -51,6 +52,11 @@ private:
 
     // --- History & word navigation ---
     static constexpr size_t MAX_HISTORY_SIZE = 1000;
+    static constexpr char kCtrlCSentinel = '\x03';
+
+    void waitForForegroundJob();
+    ForegroundJob m_fgJob;
+
     std::vector<std::string> m_history;
     size_t m_historyIndex{0};
     std::string m_scratchBuffer;

@@ -15,6 +15,7 @@ public:
 
     void registerCommand(const std::string& name, Handler handler);
     void execute(const std::string& line) const;
+    bool hasCommand(const std::string& name) const;
     std::vector<std::string> getRegisteredCommands() const;
 
 private:

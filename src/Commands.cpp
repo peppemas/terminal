@@ -565,7 +565,8 @@ void commands::cd(const Args& args)
 
 void commands::clear(const Args& /*args*/)
 {
-    std::cout << "\x1b[2J\x1b[H";
+    // Clear screen, clear scrollback, and move cursor to home (cross-platform ANSI)
+    std::cout << "\x1b[2J\x1b[3J\x1b[H" << std::flush;
 }
 
 void commands::pwd(const Args& /*args*/)
