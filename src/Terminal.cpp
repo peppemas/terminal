@@ -33,6 +33,7 @@ Terminal::Terminal()
     m_parser.registerCommand("clear", commands::clear);
     m_parser.registerCommand("cls",   commands::clear);
     m_parser.registerCommand("pwd",   commands::pwd);
+    m_parser.registerCommand("open",  commands::open);
 }
 
 Terminal::~Terminal()

@@ -27,6 +27,7 @@ namespace commands {
     void cd  (const Args& args);
     void clear(const Args& args);
     void pwd(const Args& args);
+    void open(const Args& args);
 
 } // namespace commands
 

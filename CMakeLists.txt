@@ -12,6 +12,6 @@ add_executable(terminal
 
 target_include_directories(terminal PUBLIC include)
 
-if(MINGW)
-    target_link_libraries(terminal kernel32)
+if(WIN32)
+    target_link_libraries(terminal PRIVATE shell32)
 endif()

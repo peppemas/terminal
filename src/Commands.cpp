@@ -11,6 +11,12 @@
 #include <algorithm>
 #include <cstdio>
 #include <ctime>
+#include <system_error>
+
+#define NOMINMAX
+
+#include <windows.h>
+#include <shellapi.h>
 
 namespace fs = std::filesystem;
 
@@ -109,6 +115,19 @@ std::string permissionString(const fs::file_status& s) {
     perm[9] = has(fs::perms::others_exec)  ? 'x' : '-';
 
     return perm;
+}
+
+std::wstring utf8ToWide(const std::string& utf8) {
+    if (utf8.empty()) return {};
+    int size = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+                                   utf8.data(), static_cast<int>(utf8.size()),
+                                   nullptr, 0);
+    if (size == 0) return {};
+    std::wstring wide(size, L'\0');
+    MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+                        utf8.data(), static_cast<int>(utf8.size()),
+                        wide.data(), size);
+    return wide;
 }
 
 std::string humanReadableSize(std::uintmax_t bytes) {
@@ -552,4 +571,37 @@ void commands::clear(const Args& /*args*/)
 void commands::pwd(const Args& /*args*/)
 {
     std::cout << std::filesystem::current_path().string() << '\n';
+}
+
+void commands::open(const Args& args)
+{
+    if (args.size() < 2) {
+        std::cerr << commands::RED << "open: missing directory operand\n" << commands::RESET;
+        return;
+    }
+    if (args.size() > 2) {
+        std::cerr << commands::RED << "open: too many arguments\n" << commands::RESET;
+        return;
+    }
+
+    fs::path target = fs::weakly_canonical(args[1]);
+
+    std::error_code ec;
+    bool exists = fs::exists(target, ec);
+    if (ec || !exists) {
+        std::cerr << commands::RED << "open: '" << args[1] << "' does not exist\n" << commands::RESET;
+        return;
+    }
+    bool isDir = fs::is_directory(target, ec);
+    if (ec || !isDir) {
+        std::cerr << commands::RED << "open: '" << args[1] << "' is not a directory\n" << commands::RESET;
+        return;
+    }
+
+    std::wstring wPath = utf8ToWide(target.string());
+    HINSTANCE result = ShellExecuteW(nullptr, L"open", wPath.c_str(),
+                                     nullptr, nullptr, SW_SHOWNORMAL);
+    if (reinterpret_cast<intptr_t>(result) <= 32) {
+        std::cerr << commands::RED << "open: failed to launch file explorer\n" << commands::RESET;
+    }
 }
