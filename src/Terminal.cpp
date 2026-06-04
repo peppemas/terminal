@@ -339,9 +339,9 @@ std::string Terminal::readLineRaw()
         }
 
         if (vk == VK_BACK) {
-            if (!m_inputBuffer.empty()) {
-                size_t prev = prevUtf8Char(m_inputBuffer, m_inputBuffer.size());
-                m_inputBuffer.erase(prev);
+            if (m_cursorPos > 0) {
+                size_t prev = prevUtf8Char(m_inputBuffer, m_cursorPos);
+                m_inputBuffer.erase(prev, m_cursorPos - prev);
                 m_cursorPos = prev;
                 m_lastWasTab = false;
                 refreshLine();
@@ -412,7 +412,7 @@ std::string Terminal::readLineRaw()
             if (pendingHigh != 0) {
                 uint32_t cp = 0x10000 + ((pendingHigh - 0xD800) << 10) + (wc - 0xDC00);
                 std::string utf8 = utf32ToUtf8(cp);
-                m_inputBuffer += utf8;
+                m_inputBuffer.insert(m_cursorPos, utf8);
                 m_cursorPos += utf8.length();
                 m_lastWasTab = false;
                 refreshLine();
@@ -425,7 +425,7 @@ std::string Terminal::readLineRaw()
 
         if (wc != L'\0') {
             std::string utf8 = utf32ToUtf8(static_cast<uint32_t>(wc));
-            m_inputBuffer += utf8;
+            m_inputBuffer.insert(m_cursorPos, utf8);
             m_cursorPos += utf8.length();
             m_lastWasTab = false;
             refreshLine();
