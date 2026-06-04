@@ -32,6 +32,7 @@ Terminal::Terminal()
     m_parser.registerCommand("cd",   commands::cd);
     m_parser.registerCommand("clear", commands::clear);
     m_parser.registerCommand("cls",   commands::clear);
+    m_parser.registerCommand("pwd",   commands::pwd);
 }
 
 Terminal::~Terminal()
@@ -42,15 +43,38 @@ Terminal::~Terminal()
     }
 }
 
-void Terminal::printPrompt() const
+static std::string formatPromptPath(const std::string& raw)
 {
-    const std::string path = std::filesystem::current_path().string();
+    constexpr std::size_t maxLen = 30;
+    if (raw.length() <= maxLen) {
+        return raw;
+    }
+
+    std::size_t sepPos = raw.find_last_of("\\/");
+    if (sepPos == std::string::npos || sepPos == 0) {
+        return raw;
+    }
+
+    std::string leaf = raw.substr(sepPos); // includes separator
+    std::size_t budget = maxLen - 3 - leaf.length();
+    if (budget <= 0) {
+        return raw.substr(0, maxLen - 3) + "...";
+    }
+
+    return raw.substr(0, budget) + "..." + leaf;
+}
+
+std::string Terminal::printPrompt() const
+{
+    const std::string raw = std::filesystem::current_path().string();
+    const std::string display = formatPromptPath(raw);
 
     if (m_vtEnabled) {
-        std::cout << commands::BOLD_BLUE << path << commands::RESET << "> ";
+        std::cout << commands::BOLD_BLUE << display << commands::RESET << "> ";
     } else {
-        std::cout << path << "> ";
+        std::cout << display << "> ";
     }
+    return display + "> ";
 }
 
 bool Terminal::setupRawInput()
@@ -85,8 +109,9 @@ void Terminal::restoreRawInput()
 void Terminal::refreshLine() const
 {
     std::cout << "\r\x1b[K";
-    printPrompt();
+    const std::string prompt = printPrompt();
     std::cout << m_inputBuffer;
+    std::cout << "\x1b[" << (prompt.length() + m_cursorPos + 1) << "G";
     std::cout.flush();
 }
 
@@ -113,6 +138,8 @@ std::string Terminal::readLineRaw()
         CHAR ch = record.Event.KeyEvent.uChar.AsciiChar;
 
         if (vk == VK_RETURN) {
+            m_inHistoryRecall = false;
+            m_historyIndex = 0;
             std::cout << '\n';
             return m_inputBuffer;
         }
@@ -129,6 +156,32 @@ std::string Terminal::readLineRaw()
 
         if (vk == VK_TAB) {
             handleTab();
+            continue;
+        }
+
+        bool ctrl = (record.Event.KeyEvent.dwControlKeyState & (LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED)) != 0;
+
+        if (vk == VK_UP) {
+            if (!m_history.empty()) {
+                recallHistory(+1);
+            }
+            continue;
+        }
+
+        if (vk == VK_DOWN) {
+            if (m_inHistoryRecall) {
+                recallHistory(-1);
+            }
+            continue;
+        }
+
+        if (vk == VK_LEFT && ctrl) {
+            moveCursorToPrevSpace();
+            continue;
+        }
+
+        if (vk == VK_RIGHT && ctrl) {
+            moveCursorToNextSpace();
             continue;
         }
 
@@ -263,6 +316,59 @@ void Terminal::displayCandidates(const std::vector<std::string>& candidates) con
     std::cout.flush();
 }
 
+void Terminal::addToHistory(const std::string& line)
+{
+    if (m_history.size() == MAX_HISTORY_SIZE) {
+        m_history.erase(m_history.begin());
+    }
+    m_history.push_back(line);
+}
+
+void Terminal::recallHistory(int direction)
+{
+    if (direction == +1) {
+        if (!m_inHistoryRecall) {
+            m_scratchBuffer = m_inputBuffer;
+            m_inHistoryRecall = true;
+            m_historyIndex = 1;
+        } else if (m_historyIndex < m_history.size()) {
+            ++m_historyIndex;
+        }
+        m_inputBuffer = m_history[m_history.size() - m_historyIndex];
+    } else if (direction == -1) {
+        if (m_historyIndex > 1) {
+            --m_historyIndex;
+            m_inputBuffer = m_history[m_history.size() - m_historyIndex];
+        } else {
+            m_historyIndex = 0;
+            m_inHistoryRecall = false;
+            m_inputBuffer = m_scratchBuffer;
+        }
+    }
+    m_cursorPos = m_inputBuffer.size();
+    refreshLine();
+}
+
+void Terminal::moveCursorToPrevSpace()
+{
+    if (m_cursorPos == 0) { refreshLine(); return; }
+    size_t i = m_cursorPos - 1;
+    while (i > 0 && m_inputBuffer[i] == ' ') { --i; }
+    while (i > 0 && m_inputBuffer[i] != ' ') { --i; }
+    m_cursorPos = (m_inputBuffer[i] == ' ') ? i + 1 : 0;
+    refreshLine();
+}
+
+void Terminal::moveCursorToNextSpace()
+{
+    if (m_cursorPos >= m_inputBuffer.size()) { refreshLine(); return; }
+    size_t i = m_cursorPos;
+    while (i < m_inputBuffer.size() && m_inputBuffer[i] != ' ') { ++i; }
+    while (i < m_inputBuffer.size() && m_inputBuffer[i] == ' ') { ++i; }
+    m_cursorPos = i;
+    refreshLine();
+}
+
 void Terminal::run()
 {
     bool raw = setupRawInput();
@@ -270,6 +376,9 @@ void Terminal::run()
         while (true) {
             printPrompt();
             std::string line = readLineRaw();
+            if (!line.empty()) {
+                addToHistory(line);
+            }
 
             if (line == "exit" || line == "quit") {
                 break;

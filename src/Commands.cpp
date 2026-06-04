@@ -232,3 +232,8 @@ void commands::clear(const Args& /*args*/)
 {
     std::cout << "\x1b[2J\x1b[H";
 }
+
+void commands::pwd(const Args& /*args*/)
+{
+    std::cout << std::filesystem::current_path().string() << '\n';
+}

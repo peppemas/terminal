@@ -23,6 +23,7 @@ namespace commands {
     void grep(const Args& args);
     void cd  (const Args& args);
     void clear(const Args& args);
+    void pwd(const Args& args);
 
 } // namespace commands
 

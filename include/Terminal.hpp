@@ -19,7 +19,7 @@ public:
     void run();
 
 private:
-    void printPrompt() const;
+    std::string printPrompt() const;
 
     bool setupRawInput();
     void restoreRawInput();
@@ -32,6 +32,12 @@ private:
     std::string longestCommonPrefix(const std::vector<std::string>& items) const;
     void displayCandidates(const std::vector<std::string>& candidates) const;
 
+    // --- History & word navigation helpers ---
+    void addToHistory(const std::string& line);
+    void recallHistory(int direction);
+    void moveCursorToPrevSpace();
+    void moveCursorToNextSpace();
+
     bool m_vtEnabled{false};
     HANDLE m_hConsole{INVALID_HANDLE_VALUE};
     DWORD m_originalMode{0};
@@ -42,6 +48,14 @@ private:
     size_t m_cursorPos{0};
     std::string m_lastTabToken;
     bool m_lastWasTab{false};
+
+    // --- History & word navigation ---
+    static constexpr size_t MAX_HISTORY_SIZE = 1000;
+    std::vector<std::string> m_history;
+    size_t m_historyIndex{0};
+    std::string m_scratchBuffer;
+    bool m_inHistoryRecall{false};
+
     HANDLE m_hInput{INVALID_HANDLE_VALUE};
     DWORD m_originalInputMode{0};
 };
