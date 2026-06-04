@@ -13,6 +13,9 @@ namespace commands {
     inline constexpr const char* RESET     = "\x1b[0m";
     inline constexpr const char* BOLD_BLUE = "\x1b[1;34m";
     inline constexpr const char* RED       = "\x1b[31m";
+    inline constexpr const char* BOLD_GREEN = "\x1b[1;32m";
+    inline constexpr const char* CYAN       = "\x1b[36m";
+    inline constexpr const char* MAGENTA    = "\x1b[35m";
 
     void ls  (const Args& args);
     void rm  (const Args& args);

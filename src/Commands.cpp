@@ -4,26 +4,342 @@
 #include <fstream>
 #include <filesystem>
 #include <regex>
+#include <cstdint>
+#include <utility>
+#include <chrono>
+#include <iomanip>
+#include <algorithm>
+#include <cstdio>
+#include <ctime>
 
 namespace fs = std::filesystem;
 
-void commands::ls(const Args& args)
-{
-    fs::path target = ".";
-    if (args.size() >= 2) {
-        target = args[1];
+namespace {
+
+struct LsOptions {
+    bool all        = false;
+    bool long_fmt   = false;
+    bool human      = false;
+    bool reverse    = false;
+    bool time_sort  = false;
+    bool size_sort  = false;
+    bool recursive  = false;
+    bool help       = false;
+    std::vector<fs::path> paths;
+};
+
+struct DirEntry {
+    fs::path path;
+    fs::file_status status;
+    std::uintmax_t size;
+    fs::file_time_type mtime;
+    std::uintmax_t nlink;
+    std::string owner;
+    bool is_symlink;
+    bool is_hidden;
+};
+
+LsOptions parseArgs(const commands::Args& args) {
+    LsOptions opts;
+    for (std::size_t i = 1; i < args.size(); ++i) {
+        const std::string& token = args[i];
+        if (token == "--help") {
+            opts.help = true;
+            return opts;
+        }
+        if (token.size() > 1 && token[0] == '-') {
+            for (std::size_t j = 1; j < token.size(); ++j) {
+                char c = token[j];
+                switch (c) {
+                    case 'a': opts.all = true; break;
+                    case 'l': opts.long_fmt = true; break;
+                    case 'h': opts.human = true; break;
+                    case 'r': opts.reverse = true; break;
+                    case 't': opts.time_sort = true; break;
+                    case 'S': opts.size_sort = true; break;
+                    case 'R': opts.recursive = true; break;
+                    default:
+                        std::cerr << "ls: invalid option -- '" << c << "'\n";
+                        break;
+                }
+            }
+        } else {
+            opts.paths.push_back(token);
+        }
+    }
+    if (opts.paths.empty()) {
+        opts.paths.push_back(".");
+    }
+    return opts;
+}
+
+bool isHidden(const fs::path& p) {
+    std::string name = p.filename().string();
+    return !name.empty() && name[0] == '.';
+}
+
+std::string permissionString(const fs::file_status& s) {
+    std::string perm(10, '-');
+
+    if (fs::is_directory(s)) {
+        perm[0] = 'd';
+    } else if (fs::is_symlink(s)) {
+        perm[0] = 'l';
+    } else if (fs::is_character_file(s)) {
+        perm[0] = 'c';
+    } else if (fs::is_block_file(s)) {
+        perm[0] = 'b';
+    } else if (fs::is_fifo(s)) {
+        perm[0] = 'p';
+    } else if (fs::is_socket(s)) {
+        perm[0] = 's';
     }
 
+    auto p = s.permissions();
+    auto has = [&](fs::perms bit) { return (p & bit) != fs::perms::none; };
+
+    perm[1] = has(fs::perms::owner_read)  ? 'r' : '-';
+    perm[2] = has(fs::perms::owner_write) ? 'w' : '-';
+    perm[3] = has(fs::perms::owner_exec)  ? 'x' : '-';
+    perm[4] = has(fs::perms::group_read)  ? 'r' : '-';
+    perm[5] = has(fs::perms::group_write) ? 'w' : '-';
+    perm[6] = has(fs::perms::group_exec)  ? 'x' : '-';
+    perm[7] = has(fs::perms::others_read)  ? 'r' : '-';
+    perm[8] = has(fs::perms::others_write) ? 'w' : '-';
+    perm[9] = has(fs::perms::others_exec)  ? 'x' : '-';
+
+    return perm;
+}
+
+std::string humanReadableSize(std::uintmax_t bytes) {
+    if (bytes < 1024) {
+        return std::to_string(bytes);
+    }
+
+    const char* units[] = {"K", "M", "G"};
+    double size = static_cast<double>(bytes);
+    int unitIndex = -1;
+
+    while (size >= 1024.0 && unitIndex < 2) {
+        size /= 1024.0;
+        ++unitIndex;
+    }
+
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%.1f%s", size, units[unitIndex]);
+    return std::string(buf);
+}
+
+std::string colorFor(const DirEntry& e) {
+    if (e.is_symlink) {
+        return commands::CYAN;
+    }
+    if (fs::is_directory(e.status)) {
+        return commands::BOLD_BLUE;
+    }
+    if (fs::is_regular_file(e.status)) {
+        auto p = e.status.permissions();
+        if ((p & fs::perms::owner_exec) != fs::perms::none) {
+            return commands::BOLD_GREEN;
+        }
+    }
+    if (e.is_hidden) {
+        return commands::MAGENTA;
+    }
+    return "";
+}
+
+void collectEntries(const fs::path& dir, const LsOptions& opts, std::vector<DirEntry>& out) {
     try {
-        for (const auto& entry : fs::directory_iterator(target)) {
-            if (fs::is_directory(entry.status())) {
-                std::cout << BOLD_BLUE << entry.path().filename().string() << RESET << '\n';
-            } else {
-                std::cout << entry.path().filename().string() << '\n';
+        for (const auto& entry : fs::directory_iterator(dir)) {
+            if (!opts.all && isHidden(entry.path())) {
+                continue;
             }
+
+            DirEntry de;
+            de.path = entry.path();
+            de.status = entry.status();
+            de.is_symlink = fs::is_symlink(entry.symlink_status());
+            de.is_hidden = isHidden(entry.path());
+
+            if (fs::is_regular_file(de.status)) {
+                de.size = entry.file_size();
+            } else {
+                de.size = 0;
+            }
+
+            de.mtime = entry.last_write_time();
+
+            try {
+                de.nlink = entry.hard_link_count();
+            } catch (...) {
+                de.nlink = 1;
+            }
+
+            de.owner = "";
+            out.push_back(std::move(de));
         }
     } catch (const fs::filesystem_error& e) {
-        std::cerr << "error: " << e.what() << '\n';
+        std::cerr << "ls: cannot access '" << dir.string() << "': " << e.what() << '\n';
+    }
+}
+
+void sortEntries(std::vector<DirEntry>& entries, const LsOptions& opts) {
+    auto cmp = [](const DirEntry& a, const DirEntry& b, const LsOptions& o) {
+        if (o.time_sort) {
+            return a.mtime > b.mtime;
+        }
+        if (o.size_sort) {
+            return a.size > b.size;
+        }
+        return a.path.filename().string() < b.path.filename().string();
+    };
+
+    if (opts.reverse) {
+        std::sort(entries.begin(), entries.end(),
+                  [&opts, &cmp](const DirEntry& a, const DirEntry& b) {
+                      return cmp(b, a, opts);
+                  });
+    } else {
+        std::sort(entries.begin(), entries.end(),
+                  [&opts, &cmp](const DirEntry& a, const DirEntry& b) {
+                      return cmp(a, b, opts);
+                  });
+    }
+}
+
+void printEntries(const std::vector<DirEntry>& entries, const LsOptions& opts,
+                  std::size_t linkWidth, std::size_t ownerWidth, std::size_t sizeWidth) {
+    if (entries.empty()) {
+        return;
+    }
+
+    if (opts.long_fmt) {
+        for (const auto& e : entries) {
+            std::string perm = permissionString(e.status);
+            std::string sizeStr = opts.human ? humanReadableSize(e.size)
+                                              : std::to_string(e.size);
+
+            auto sctp = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
+                e.mtime - std::filesystem::file_time_type::clock::now() + std::chrono::system_clock::now()
+            );
+            std::time_t t = std::chrono::system_clock::to_time_t(sctp);
+            std::tm* tm = std::localtime(&t);
+
+            std::cout << std::left << std::setw(10) << perm << ' '
+                      << std::right << std::setw(static_cast<int>(linkWidth)) << e.nlink << ' '
+                      << std::left << std::setw(static_cast<int>(ownerWidth)) << e.owner << ' '
+                      << std::right << std::setw(static_cast<int>(sizeWidth)) << sizeStr << ' ';
+
+            if (tm) {
+                std::cout << std::put_time(tm, "%b %d %H:%M") << ' ';
+            } else {
+                std::cout << "??? ?? ??:?? ";
+            }
+
+            std::cout << colorFor(e) << e.path.filename().string() << commands::RESET << '\n';
+        }
+    } else {
+        for (const auto& e : entries) {
+            std::cout << colorFor(e) << e.path.filename().string() << commands::RESET << '\n';
+        }
+    }
+}
+
+std::vector<DirEntry> listDirectory(const fs::path& dir, const LsOptions& opts, bool printHeader) {
+    if (printHeader) {
+        std::cout << dir.string() << ":\n";
+    }
+
+    std::vector<DirEntry> entries;
+
+    if (!fs::is_directory(dir)) {
+        try {
+            DirEntry de;
+            de.path = dir;
+            de.status = fs::status(dir);
+            de.is_symlink = fs::is_symlink(fs::symlink_status(dir));
+            de.is_hidden = isHidden(dir);
+
+            if (fs::is_regular_file(de.status)) {
+                de.size = fs::file_size(dir);
+            } else {
+                de.size = 0;
+            }
+
+            de.mtime = fs::last_write_time(dir);
+            de.nlink = 1;
+            de.owner = "";
+            entries.push_back(std::move(de));
+        } catch (const fs::filesystem_error& e) {
+            std::cerr << "ls: cannot access '" << dir.string() << "': " << e.what() << '\n';
+            return entries;
+        }
+    } else {
+        collectEntries(dir, opts, entries);
+    }
+
+    sortEntries(entries, opts);
+
+    std::size_t linkWidth = 0, ownerWidth = 0, sizeWidth = 0;
+    if (opts.long_fmt) {
+        for (const auto& e : entries) {
+            linkWidth = std::max(linkWidth, std::to_string(e.nlink).length());
+            ownerWidth = std::max(ownerWidth, e.owner.length());
+            std::string sizeStr = opts.human ? humanReadableSize(e.size)
+                                              : std::to_string(e.size);
+            sizeWidth = std::max(sizeWidth, sizeStr.length());
+        }
+    }
+
+    printEntries(entries, opts, linkWidth, ownerWidth, sizeWidth);
+    return entries;
+}
+
+void lsRecursive(const fs::path& dir, const LsOptions& opts) {
+    auto entries = listDirectory(dir, opts, true);
+    for (const auto& e : entries) {
+        if (fs::is_directory(e.status)) {
+            try {
+                lsRecursive(e.path, opts);
+            } catch (const fs::filesystem_error& err) {
+                std::cerr << "ls: cannot access '" << e.path.string() << "': " << err.what() << '\n';
+            }
+        }
+    }
+}
+
+void printHelp() {
+    std::cout << "usage: ls [options] [path...]\n"
+              << "  -a    include hidden entries\n"
+              << "  -l    long listing format\n"
+              << "  -h    human-readable sizes (with -l)\n"
+              << "  -r    reverse sort order\n"
+              << "  -t    sort by modification time\n"
+              << "  -S    sort by file size\n"
+              << "  -R    list subdirectories recursively\n";
+}
+
+} // anonymous namespace
+
+void commands::ls(const Args& args)
+{
+    auto opts = parseArgs(args);
+    if (opts.help) {
+        printHelp();
+        return;
+    }
+
+    for (const auto& target : opts.paths) {
+        try {
+            if (opts.recursive && fs::is_directory(target)) {
+                lsRecursive(target, opts);
+            } else {
+                listDirectory(target, opts, opts.paths.size() > 1);
+            }
+        } catch (const fs::filesystem_error& e) {
+            std::cerr << "ls: cannot access '" << target.string() << "': " << e.what() << '\n';
+        }
     }
 }
 
