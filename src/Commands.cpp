@@ -6,6 +6,7 @@
 #include <regex>
 #include <cstdint>
 #include <utility>
+#include <vector>
 #include <chrono>
 #include <iomanip>
 #include <algorithm>
@@ -669,18 +670,86 @@ void commands::mv(const Args& args)
 
 void commands::cat(const Args& args)
 {
+    // --help
+    for (std::size_t i = 1; i < args.size(); ++i) {
+        if (args[i] == "--help") {
+            std::cout << "usage: cat [file...]\n"
+                      << "  Concatenate files to standard output.\n"
+                      << "  Limits: regular files only, max 10 MiB streamed, Ctrl+C to abort.\n";
+            return;
+        }
+    }
+
     if (args.size() < 2) {
-        std::cerr << "usage: cat <file>\n";
+        // Unix `cat` with no args is silent — keep that behavior
         return;
     }
 
-    std::ifstream file(args[1]);
-    if (!file.is_open()) {
-        std::cerr << "cat: cannot open '" << args[1] << "'\n";
-        return;
-    }
+    HANDLE hIn = GetStdHandle(STD_INPUT_HANDLE);
+    constexpr std::size_t CHUNK = 64 * 1024;
+    constexpr std::size_t MAX_TOTAL = 10 * 1024 * 1024;
+    std::size_t totalWritten = 0;
 
-    std::cout << file.rdbuf();
+    auto pollCtrlC = [&]() -> bool {
+        if (hIn == INVALID_HANDLE_VALUE) return false;
+        DWORD pending = 0;
+        if (!GetNumberOfConsoleInputEvents(hIn, &pending) || pending == 0) return false;
+        for (DWORD k = 0; k < pending; ++k) {
+            INPUT_RECORD rec;
+            DWORD got = 0;
+            if (!ReadConsoleInput(hIn, &rec, 1, &got) || got == 0) break;
+            if (rec.EventType == KEY_EVENT && rec.Event.KeyEvent.bKeyDown) {
+                WORD vk = rec.Event.KeyEvent.wVirtualKeyCode;
+                bool ctrl = (rec.Event.KeyEvent.dwControlKeyState &
+                             (LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED)) != 0;
+                if (vk == 'C' && ctrl) return true;
+            }
+        }
+        return false;
+    };
+
+    for (std::size_t i = 1; i < args.size(); ++i) {
+        const std::string& path = args[i];
+        std::error_code ec;
+        if (!fs::is_regular_file(path, ec)) {
+            std::cerr << "cat: '" << path << "': "
+                      << (ec ? ec.message().c_str() : "not a regular file") << '\n';
+            continue;
+        }
+
+        std::ifstream file(path, std::ios::binary);
+        if (!file.is_open()) {
+            std::cerr << "cat: cannot open '" << path << "'\n";
+            continue;
+        }
+
+        std::vector<char> buf(CHUNK);
+        bool aborted = false;
+        while (file) {
+            file.read(buf.data(), static_cast<std::streamsize>(buf.size()));
+            std::streamsize got = file.gcount();
+            if (got > 0) {
+                std::cout.write(buf.data(), got);
+                totalWritten += static_cast<std::size_t>(got);
+                if (totalWritten > MAX_TOTAL) {
+                    std::cerr << "cat: output truncated at 10 MiB; use a pager\n";
+                    aborted = true;
+                    break;
+                }
+            }
+            if (file.bad()) {
+                std::cerr << "cat: read error on '" << path << "'\n";
+                break;
+            }
+            if (pollCtrlC()) {
+                std::cout << "^C\n";
+                aborted = true;
+                break;
+            }
+            if (file.eof()) break;
+        }
+        if (aborted) return;
+    }
 }
 
 void commands::tail(const Args& args)
