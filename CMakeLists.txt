@@ -1,0 +1,17 @@
+cmake_minimum_required(VERSION 3.20)
+project(terminal)
+
+set(CMAKE_CXX_STANDARD 20)
+
+add_executable(terminal
+    main.cpp
+    src/Terminal.cpp
+    src/CommandParser.cpp
+    src/Commands.cpp
+)
+
+target_include_directories(terminal PUBLIC include)
+
+if(MINGW)
+    target_link_libraries(terminal kernel32)
+endif()
