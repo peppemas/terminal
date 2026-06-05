@@ -56,11 +56,11 @@ echo.
 goto :done
 
 :fail
-echo Press any key to close...
-pause >nul
+REM echo Press any key to close...
+REM pause >nul
 exit /b 1
 
 :done
-echo Press any key to close...
-pause >nul
+REM echo Press any key to close...
+REM pause >nul
 exit /b 0
