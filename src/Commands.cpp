@@ -1,4 +1,4 @@
-﻿#include "Commands.hpp"
+#include "Commands.hpp"
 
 #include <iostream>
 #include <fstream>
@@ -43,6 +43,13 @@ struct LsOptions {
     bool size_sort  = false;
     bool recursive  = false;
     bool help       = false;
+    std::vector<fs::path> paths;
+};
+
+struct RmOptions {
+    bool recursive = false;
+    bool help      = false;
+    bool error     = false;
     std::vector<fs::path> paths;
 };
 
@@ -586,6 +593,66 @@ void lsRecursive(const fs::path& dir, const LsOptions& opts, std::ostream& out) 
     }
 }
 
+// ------------------------------------------------------------------
+// rm helpers: argument parsing and Recycle Bin integration
+// ------------------------------------------------------------------
+
+RmOptions parseRmArgs(const commands::Args& args) {
+    RmOptions opts;
+    bool operandsCollected = false;
+    for (std::size_t i = 1; i < args.size(); ++i) {
+        const std::string& token = args[i];
+        if (token == "-r" && !operandsCollected) {
+            opts.recursive = true;
+        } else if (token.size() >= 1 && token[0] == '-') {
+            std::cerr << "rm: invalid option -- '" << token << "'\n";
+            opts.error = true;
+        } else {
+            opts.paths.push_back(token);
+            operandsCollected = true;
+        }
+    }
+    if (opts.paths.empty() && !opts.error) {
+        std::cerr << "usage: rm [-r] <path>...\n";
+        opts.error = true;
+    }
+    return opts;
+}
+
+bool moveToRecycleBin(const std::filesystem::path& p, bool recursive, std::ostream& err) {
+    std::error_code ec;
+    if (!fs::exists(p, ec) || ec) {
+        err << "rm: cannot remove '" << p.string() << "': No such file or directory\n";
+        return false;
+    }
+
+    if (fs::is_directory(p, ec) && !recursive) {
+        // Check emptiness
+        auto it = fs::directory_iterator(p, ec);
+        if (!ec && it != fs::directory_iterator()) {
+            err << "rm: cannot remove '" << p.string() << "': Is a directory\n";
+            return false;
+        }
+    }
+
+    // Convert to absolute wide path with double null termination
+    fs::path abs = fs::absolute(p);
+    std::wstring wsrc = abs.wstring();
+    wsrc.push_back(L'\0');  // second terminator required by SHFileOperationW
+
+    SHFILEOPSTRUCTW op = {};
+    op.wFunc = FO_DELETE;
+    op.pFrom = wsrc.c_str();
+    op.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI;
+
+    int ret = SHFileOperationW(&op);
+    if (ret != 0 || op.fAnyOperationsAborted) {
+        err << "rm: failed to move '" << p.string() << "' to Recycle Bin\n";
+        return false;
+    }
+    return true;
+}
+
 void printHelp(std::ostream& out) {
     out << "usage: ls [options] [path...]\n"
               << "  -a    include hidden entries\n"
@@ -622,33 +689,35 @@ void commands::ls(const Args& args, std::ostream& out, std::istream& /*in*/)
 
 void commands::rm(const Args& args, std::ostream& out, std::istream& /*in*/)
 {
-    if (args.size() < 2) {
-        std::cerr << "usage: rm [-r] <path>\n";
+    RmOptions opts = parseRmArgs(args);
+    if (opts.error) {
         return;
     }
 
-    bool recursive = false;
-    std::size_t pathIndex = 1;
-    if (args[1] == "-r") {
-        if (args.size() < 3) {
-            std::cerr << "usage: rm [-r] <path>\n";
-            return;
-        }
-        recursive = true;
-        pathIndex = 2;
-    }
+    for (const auto& path : opts.paths) {
+        std::error_code ec;
+        fs::path target = fs::weakly_canonical(path, ec);
 
-    try {
-        if (recursive) {
-            std::uintmax_t n = fs::remove_all(args[pathIndex]);
-            out << "removed " << n << " items\n";
-        } else {
-            if (!fs::remove(args[pathIndex])) {
-                std::cerr << "rm: failed to remove '" << args[pathIndex] << "'\n";
+        bool exists = fs::exists(target, ec);
+        if (!exists || ec) {
+            std::cerr << "rm: cannot remove '" << path.string()
+                      << "': No such file or directory\n";
+            continue;
+        }
+
+        bool isDir = fs::is_directory(target, ec);
+        if (isDir && !opts.recursive) {
+            auto it = fs::directory_iterator(target, ec);
+            if (!ec && it != fs::directory_iterator()) {
+                std::cerr << "rm: cannot remove '" << path.string()
+                          << "': Is a directory\n";
+                continue;
             }
         }
-    } catch (const fs::filesystem_error& e) {
-        std::cerr << "error: " << e.what() << '\n';
+
+        if (moveToRecycleBin(target, opts.recursive, std::cerr)) {
+            out << "rm: '" << path.string() << "' moved to Recycle Bin\n";
+        }
     }
 }
 
