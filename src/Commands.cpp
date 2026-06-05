@@ -574,7 +574,7 @@ std::vector<DirEntry> listDirectory(const fs::path& dir, const LsOptions& opts, 
 }
 
 void lsRecursive(const fs::path& dir, const LsOptions& opts, std::ostream& out) {
-    auto entries = listDirectory(dir, opts, true, out);
+    auto entries = listDirectory(dir, opts, false, out);
     for (const auto& e : entries) {
         if (fs::is_directory(e.status)) {
             try {
@@ -612,7 +612,7 @@ void commands::ls(const Args& args, std::ostream& out, std::istream& /*in*/)
             if (opts.recursive && fs::is_directory(target)) {
                 lsRecursive(target, opts, out);
             } else {
-                listDirectory(target, opts, opts.paths.size() > 1, out);
+                listDirectory(target, opts, false, out);
             }
         } catch (const fs::filesystem_error& e) {
             std::cerr << "ls: cannot access '" << target.string() << "': " << e.what() << '\n';
