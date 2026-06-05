@@ -1,5 +1,6 @@
 #include "CommandParser.hpp"
 
+#include "GlobExpander.hpp"
 #include "ShellTokenizer.hpp"
 #include <iostream>
 #include <sstream>
@@ -20,7 +21,12 @@ bool CommandParser::executePipeline(const std::string& line, std::istream& in, s
         return true;
     }
 
-    auto stages = shell::tokenizePipeline(line);
+    auto tokenStages = shell::tokenizePipeline(line);
+    std::vector<std::vector<std::string>> stages;
+    stages.reserve(tokenStages.size());
+    for (const auto& ts : tokenStages) {
+        stages.push_back(GlobExpander::expand(ts));
+    }
     if (stages.empty()) {
         return true;
     }

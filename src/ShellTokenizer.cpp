@@ -11,17 +11,19 @@ bool isWs(char c)   { return c == ' ' || c == '\t'; }
 
 } // namespace
 
-std::vector<std::vector<std::string>> tokenizePipeline(const std::string& line) {
-    std::vector<std::vector<std::string>> stages;
-    std::vector<std::string> current;
+std::vector<std::vector<Token>> tokenizePipeline(const std::string& line) {
+    std::vector<std::vector<Token>> stages;
+    std::vector<Token> current;
     std::string token;
     bool inToken = false;
+    bool tokenQuoted = false;
     char quote = 0; // 0, '\'' or '"'
 
     auto pushToken = [&]() {
         if (inToken) {
-            current.push_back(std::move(token));
+            current.push_back(Token{std::move(token), tokenQuoted});
             token.clear();
+            tokenQuoted = false;
             inToken = false;
         }
     };
@@ -56,6 +58,7 @@ std::vector<std::vector<std::string>> tokenizePipeline(const std::string& line) 
         if (c == '\'' || c == '"') {
             quote = c;
             inToken = true;
+            tokenQuoted = true;
             continue;
         }
 
