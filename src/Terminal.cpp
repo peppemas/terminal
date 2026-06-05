@@ -214,6 +214,9 @@ Terminal::Terminal()
     m_parser.registerCommand("pwd",  [](const commands::Args& a) { commands::pwd(a); });
     m_parser.registerCommand("open", [](const commands::Args& a) { commands::open(a); });
     m_parser.registerCommand("echo", [](const commands::Args& a) { commands::echo(a); });
+    m_parser.registerCommand("push", [](const commands::Args& a) { commands::push(a); });
+    m_parser.registerCommand("pop",  [](const commands::Args& a) { commands::pop(a); });
+    m_parser.registerCommand("slots", [](const commands::Args& a) { commands::slots(a); });
 
     m_parser.registerPipelineCommand("cat",  [](const commands::Args& a, std::ostream& out, std::istream& in) { commands::cat(a, out, in); });
     m_parser.registerPipelineCommand("grep", [](const commands::Args& a, std::ostream& out, std::istream& in) { commands::grep(a, out, in); });
@@ -643,6 +646,8 @@ void Terminal::waitForForegroundJob()
 
 void Terminal::run()
 {
+    std::cout << "Starting terminal...\n";
+
     bool raw = setupRawInput();
     if (raw) {
         while (true) {

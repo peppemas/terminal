@@ -1,4 +1,4 @@
-#include "Commands.hpp"
+﻿#include "Commands.hpp"
 
 #include <iostream>
 #include <fstream>
@@ -6,7 +6,8 @@
 #include <regex>
 #include <cstdint>
 #include <utility>
-#include <vector>
+#include <array>
+#include <optional>
 #include <chrono>
 #include <iomanip>
 #include <algorithm>
@@ -22,6 +23,16 @@
 namespace fs = std::filesystem;
 
 namespace {
+
+static std::array<std::optional<std::filesystem::path>, 10> g_dirSlots;
+
+bool parseSlotIndex(const std::string& token, int& outIndex) {
+    if (token.size() == 1 && token[0] >= '0' && token[0] <= '9') {
+        outIndex = token[0] - '0';
+        return true;
+    }
+    return false;
+}
 
 struct LsOptions {
     bool all        = false;
@@ -641,6 +652,19 @@ void commands::rm(const Args& args, std::ostream& out, std::istream& /*in*/)
     }
 }
 
+void commands::slots(const Args& args, std::ostream& out, std::istream& /*in*/) {
+    bool any = false;
+    for (int i = 0; i < 10; ++i) {
+        if (g_dirSlots[i].has_value()) {
+            out << "slot " << i << ": " << g_dirSlots[i].value().string() << "\n";
+            any = true;
+        }
+    }
+    if (!any) {
+        out << "(no slots stored)\n";
+    }
+}
+
 void commands::cp(const Args& args, std::ostream& /*out*/, std::istream& /*in*/)
 {
     if (args.size() < 3) {
@@ -911,4 +935,44 @@ void commands::echo(const Args& args, std::ostream& out, std::istream& /*in*/)
         out << args[i];
     }
     out << '\n';
+}
+
+void commands::push(const Args& args, std::ostream& out, std::istream& /*in*/)
+{
+    if (args.size() < 2) {
+        std::cerr << "usage: push <num> [directory]\n";
+        return;
+    }
+    int idx = 0;
+    if (!parseSlotIndex(args[1], idx)) {
+        std::cerr << "push: '" << args[1] << "' is not a valid slot (0-9)\n";
+        return;
+    }
+    fs::path path = (args.size() >= 3) ? fs::path(args[2]) : fs::current_path();
+    g_dirSlots[idx] = path;
+    out << "pushed slot " << idx << " -> " << path.string() << '\n';
+}
+
+void commands::pop(const Args& args, std::ostream& out, std::istream& /*in*/)
+{
+    if (args.size() < 2) {
+        std::cerr << "usage: pop <num>\n";
+        return;
+    }
+    int idx = 0;
+    if (!parseSlotIndex(args[1], idx)) {
+        std::cerr << "pop: '" << args[1] << "' is not a valid slot (0-9)\n";
+        return;
+    }
+    if (!g_dirSlots[idx].has_value()) {
+        std::cerr << "pop: slot " << idx << " is empty\n";
+        return;
+    }
+    fs::path target = g_dirSlots[idx].value();
+    try {
+        fs::current_path(target);
+        std::cout << "popped slot " << idx << " -> " << target.string() << '\n';
+    } catch (const fs::filesystem_error& e) {
+        std::cerr << "error: " << e.what() << '\n';
+    }
 }

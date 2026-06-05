@@ -30,6 +30,9 @@ namespace commands {
     void pwd(const Args& args, std::ostream& out, std::istream& in);
     void open(const Args& args, std::ostream& out, std::istream& in);
     void echo(const Args& args, std::ostream& out, std::istream& in);
+    void push(const Args& args, std::ostream& out, std::istream& in);
+    void pop (const Args& args, std::ostream& out, std::istream& in);
+    void slots(const Args& args, std::ostream& out, std::istream& in);
 
     // Legacy backward-compatible wrappers
     inline void ls  (const Args& args) { ls(args, std::cout, std::cin); }
@@ -44,6 +47,9 @@ namespace commands {
     inline void pwd(const Args& args) { pwd(args, std::cout, std::cin); }
     inline void open(const Args& args) { open(args, std::cout, std::cin); }
     inline void echo(const Args& args) { echo(args, std::cout, std::cin); }
+    inline void push(const Args& args) { push(args, std::cout, std::cin); }
+    inline void pop (const Args& args) { pop (args, std::cout, std::cin); }
+    inline void slots(const Args& args) { slots(args, std::cout, std::cin); }
 
 } // namespace commands
 
