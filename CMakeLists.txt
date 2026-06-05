@@ -10,6 +10,7 @@ add_executable(terminal
     src/Commands.cpp
     src/ForegroundJob.cpp
     src/ShellTokenizer.cpp
+    src/MoreCommand.cpp
 )
 
 target_include_directories(terminal PUBLIC include)
