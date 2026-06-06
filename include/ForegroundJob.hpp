@@ -15,6 +15,7 @@ struct ForegroundJob {
     bool interrupt() const;
     void reset();
     bool isActive() const { return active; }
+    bool wait(DWORD timeoutMs = INFINITE, DWORD* outExitCode = nullptr) const;
 };
 
 #endif // TERMINAL_FOREGROUNDJOB_HPP

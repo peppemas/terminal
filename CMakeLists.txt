@@ -12,6 +12,8 @@ add_executable(terminal
     src/ShellTokenizer.cpp
     src/MoreCommand.cpp
     src/GlobExpander.cpp
+    src/CommandResolver.cpp
+    src/ExternalExecutor.cpp
 )
 
 target_include_directories(terminal PUBLIC include)

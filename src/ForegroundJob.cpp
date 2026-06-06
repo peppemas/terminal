@@ -34,6 +34,28 @@ bool ForegroundJob::interrupt() const
     return GenerateConsoleCtrlEvent(CTRL_C_EVENT, groupId) != 0;
 }
 
+bool ForegroundJob::wait(DWORD timeoutMs, DWORD* outExitCode) const
+{
+    if (!active || hProcess == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+
+    DWORD waitResult = WaitForSingleObject(hProcess, timeoutMs);
+    if (waitResult != WAIT_OBJECT_0) {
+        return false;
+    }
+
+    if (outExitCode) {
+        DWORD code = 0;
+        if (!GetExitCodeProcess(hProcess, &code)) {
+            return false;
+        }
+        *outExitCode = code;
+    }
+
+    return true;
+}
+
 void ForegroundJob::reset()
 {
     if (hProcess != INVALID_HANDLE_VALUE) {

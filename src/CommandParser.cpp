@@ -1,5 +1,7 @@
 #include "CommandParser.hpp"
 
+#include "CommandResolver.hpp"
+#include "ExternalExecutor.hpp"
 #include "GlobExpander.hpp"
 #include "ShellTokenizer.hpp"
 #include <iostream>
@@ -57,8 +59,17 @@ bool CommandParser::executePipeline(const std::string& line, std::istream& in, s
             if (lIt != m_registry.end()) {
                 lIt->second(argv);
             } else {
-                std::cerr << "command not found: " << cmd << '\n';
-                return false;
+                auto resolved = CommandResolver::resolve(cmd, argv);
+                if (resolved) {
+                    int exitCode = 0;
+                    if (!ExternalExecutor::run(*resolved, &exitCode)) {
+                        std::cerr << "failed to start: " << cmd << '\n';
+                        return false;
+                    }
+                } else {
+                    std::cerr << "command not found: " << cmd << '\n';
+                    return false;
+                }
             }
         }
 
