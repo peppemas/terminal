@@ -716,7 +716,6 @@ void commands::rm(const Args& args, std::ostream& out, std::istream& /*in*/)
         }
 
         if (moveToRecycleBin(target, opts.recursive, std::cerr)) {
-            out << "rm: '" << path.string() << "' moved to Recycle Bin\n";
         }
     }
 }
@@ -941,16 +940,28 @@ void commands::cd(const Args& args, std::ostream& /*out*/, std::istream& /*in*/)
     }
 
     std::string target = args[1];
+    std::replace(target.begin(), target.end(), '/', '\\');
 
     if (target.size() == 2 && target[1] == ':') {
         target += '\\';
     }
 
-    try {
-        fs::current_path(target);
-    } catch (const fs::filesystem_error& e) {
-        std::cerr << "error: " << e.what() << '\n';
+    std::wstring wtarget = utf8ToWide(target);
+    if (wtarget.empty() && !target.empty()) {
+        std::cerr << "cd: invalid UTF-8 path: " << target << '\n';
+        return;
     }
+
+    if (!SetCurrentDirectoryW(wtarget.c_str())) {
+        DWORD err = GetLastError();
+        std::string msg = std::system_category().message(err);
+        std::cerr << "cd: " << msg << ": " << target << '\n';
+        return;
+    }
+
+    // Re-sync std::filesystem with the updated OS working directory
+    // so that push/pop (which use fs::current_path()) stay consistent.
+    fs::current_path(fs::current_path());
 }
 
 void commands::clear(const Args& /*args*/, std::ostream& out, std::istream& /*in*/)

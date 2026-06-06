@@ -62,13 +62,6 @@ std::vector<std::vector<Token>> tokenizePipeline(const std::string& line) {
             continue;
         }
 
-        if (c == '\\' && i + 1 < line.size()) {
-            token.push_back(line[i + 1]);
-            inToken = true;
-            ++i;
-            continue;
-        }
-
         if (isPipe(c)) {
             pushStage();
             continue;
