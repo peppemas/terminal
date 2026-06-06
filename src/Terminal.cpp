@@ -698,26 +698,12 @@ const char* ascii_art =
                 break;
             }
 
-            if (m_parser.hasCommand(firstToken)) {
-                try {
-                    m_parser.execute(line);
-                } catch (const std::exception& e) {
-                    std::cerr << "error: " << e.what() << '\n';
-                }
-            } else {
-                int wlen = MultiByteToWideChar(CP_UTF8, 0, line.data(), static_cast<int>(line.size()), nullptr, 0);
-                if (wlen > 0) {
-                    std::vector<wchar_t> wbuf(wlen + 1, L'\0');
-                    MultiByteToWideChar(CP_UTF8, 0, line.data(), static_cast<int>(line.size()), wbuf.data(), wlen);
-                    std::wstring wline(wbuf.data());
-                    if (m_fgJob.start(wline)) {
-                        waitForForegroundJob();
-                    } else {
-                        std::cerr << "command not found: " << firstToken << '\n';
-                    }
-                } else {
-                    std::cerr << "command not found: " << firstToken << '\n';
-                }
+            // Use the parser for both built-ins and external commands.
+            // The parser will try: built-in -> CommandResolver::resolve() -> ExternalExecutor.
+            try {
+                m_parser.execute(line);
+            } catch (const std::exception& e) {
+                std::cerr << "error: " << e.what() << '\n';
             }
         }
         restoreRawInput();

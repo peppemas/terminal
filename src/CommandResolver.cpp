@@ -4,17 +4,6 @@
 #include <algorithm>
 #include <cassert>
 
-// TEMPORARY DEBUG — remove after diagnostics
-#include <iostream>
-#define DBG_RESOLVER 1
-#ifdef DBG_RESOLVER
-#define DR_LOG(msg) do { std::wcout << L"[DR] " << msg << std::endl; } while (0)
-#define DR_LOG_NATIVE(msg) do { std::cout << "[DR] " << msg << std::endl; } while (0)
-#else
-#define DR_LOG(msg) do { } while (0)
-#define DR_LOG_NATIVE(msg) do { } while (0)
-#endif
-
 // ---------------------------------------------------------------------------
 // Internal helper: read a semicolon-delimited environment variable via the
 // wide-character Windows API.
@@ -199,15 +188,21 @@ CommandResolver::resolve(const std::string& name, const std::vector<std::string>
         return std::nullopt;
     }
 
-    // --- Unqualified name: explicit PATH+PATHEXT loop (INSTRUMENTED) ----
+    // --- Unqualified name: explicit PATH+PATHEXT loop --------------------
+    // We use our own getPathext() (which has a hardcoded Windows default
+    // fallback including .CMD) so the search works even when the
+    // process environment has a stripped PATHEXT (e.g. when the
+    // terminal is launched from an IDE).
+    //
+    // Search order: current directory first, then each PATH directory.
+    // Within each directory:
+    //   a) Try the name + each PATHEXT extension (e.g. npm.CMD, npm.EXE)
+    //      so that npm.cmd is preferred over a bare Unix-style shim.
+    //   b) Then try the bare name as a fallback for native executables
+    //      that have no file extension.
+
     const std::wstring wname   = widen(name);
     const auto         pathext = getPathext();
-
-    DR_LOG(L"resolve() called with name='" << name.c_str() << L"' wname='" << wname << L"'");
-    DR_LOG(L"PATHEXT entries: " << pathext.size());
-    for (std::size_t i = 0; i < pathext.size(); ++i) {
-        DR_LOG(L"  pathext[" << i << L"] = '" << pathext[i] << L"' (len=" << pathext[i].size() << L")");
-    }
 
     std::wstring curDir(32768, L'\0');
     {
@@ -215,7 +210,11 @@ CommandResolver::resolve(const std::string& name, const std::vector<std::string>
         if (n > 0 && n < 32768) curDir.resize(n);
         else                     curDir.clear();
     }
-    DR_LOG(L"current dir: '" << curDir << L"' (len=" << curDir.size() << L")");
+
+    auto isRegularFile = [](const std::wstring& p) -> bool {
+        DWORD a = ::GetFileAttributesW(p.c_str());
+        return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
+    };
 
     auto toAbsolute = [](const std::wstring& p) -> std::wstring {
         std::wstring buf(32768, L'\0');
@@ -224,72 +223,36 @@ CommandResolver::resolve(const std::string& name, const std::vector<std::string>
         return p;
     };
 
-    auto inspectDir = [](const std::wstring& d) {
-        DR_LOG(L"  PATH entry: '" << d << L"' (len=" << d.size() << L")");
-        if (!d.empty()) {
-            DR_LOG(L"    first char: 0x" << std::hex << (int)d.front() << std::dec
-                     << L" last char: 0x" << std::hex << (int)d.back() << std::dec);
-            if (d.front() == L'"' || d.back() == L'"')
-                DR_LOG(L"    *** HAS SURROUNDING QUOTES ***");
-            if (d.back() == L' ' || d.back() == L'\t' || d.back() == L'\\')
-                DR_LOG(L"    *** TRAILING SPACE/TAB/BACKSLASH ***");
-        }
-    };
-
-    auto tryDir = [&](const std::wstring& dir, const std::wstring& dirLabel) -> std::optional<ResolutionResult> {
-        if (dir.empty()) {
-            DR_LOG(L"tryDir(" << dirLabel << L"): empty, skip");
-            return std::nullopt;
-        }
+    auto tryDir = [&](const std::wstring& dir) -> std::optional<ResolutionResult> {
+        if (dir.empty()) return std::nullopt;
         const std::wstring base = dir + L'\\' + wname;
-        DR_LOG(L"tryDir(" << dirLabel << L"): base = '" << base << L"'");
 
-        // a) PATHEXT extensions
+        // a) PATHEXT extensions -- cmd.exe-compatible, finds npm.cmd etc.
         for (const auto& ext : pathext) {
             std::wstring candidate = base + ext;
-            DWORD a = ::GetFileAttributesW(candidate.c_str());
-            bool exists = (a != INVALID_FILE_ATTRIBUTES);
-            bool isDir  = exists && (a & FILE_ATTRIBUTE_DIRECTORY);
-            DR_LOG(L"  candidate='" << candidate << L"' GetFileAttributesW=" << a
-                     << L" exists=" << (exists ? 1 : 0) << L" isDir=" << (isDir ? 1 : 0));
-            if (exists && !isDir) {
+            if (isRegularFile(candidate)) {
                 ResolutionResult r;
                 r.executable  = std::filesystem::path(toAbsolute(candidate));
                 r.commandLine = buildCommandLine(r.executable.wstring(), args);
-                DR_LOG(L"  *** RESOLVED via PATHEXT ***");
                 return r;
             }
         }
 
-        // b) Bare name
-        {
-            DWORD a = ::GetFileAttributesW(base.c_str());
-            bool exists = (a != INVALID_FILE_ATTRIBUTES);
-            bool isDir  = exists && (a & FILE_ATTRIBUTE_DIRECTORY);
-            DR_LOG(L"  bare='" << base << L"' GetFileAttributesW=" << a
-                     << L" exists=" << (exists ? 1 : 0) << L" isDir=" << (isDir ? 1 : 0));
-            if (exists && !isDir) {
-                ResolutionResult r;
-                r.executable  = std::filesystem::path(toAbsolute(base));
-                r.commandLine = buildCommandLine(r.executable.wstring(), args);
-                DR_LOG(L"  *** RESOLVED via BARE ***");
-                return r;
-            }
+        // b) Bare name -- fallback for native Windows binaries with no extension.
+        if (isRegularFile(base)) {
+            ResolutionResult r;
+            r.executable  = std::filesystem::path(toAbsolute(base));
+            r.commandLine = buildCommandLine(r.executable.wstring(), args);
+            return r;
         }
 
         return std::nullopt;
     };
 
-    DR_LOG(L"--- searching current dir ---");
-    if (auto r = tryDir(curDir, L"cwd")) return r;
-
-    auto dirs = getPathDirs();
-    DR_LOG(L"--- searching PATH: " << dirs.size() << L" entries ---");
-    for (std::size_t i = 0; i < dirs.size(); ++i) {
-        inspectDir(dirs[i]);
-        if (auto r = tryDir(dirs[i], std::to_wstring(i))) return r;
+    if (auto r = tryDir(curDir)) return r;
+    for (const auto& dir : getPathDirs()) {
+        if (auto r = tryDir(dir)) return r;
     }
 
-    DR_LOG(L"*** NOT FOUND ***");
     return std::nullopt;
 }
