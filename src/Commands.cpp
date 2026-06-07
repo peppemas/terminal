@@ -433,37 +433,88 @@ std::string colorFor(const DirEntry& e) {
 }
 
 void collectEntries(const fs::path& dir, const LsOptions& opts, std::vector<DirEntry>& out) {
-    try {
-        for (const auto& entry : fs::directory_iterator(dir)) {
-            if (!opts.all && isHidden(entry.path())) {
-                continue;
+    std::error_code ec;
+    fs::directory_iterator it(dir, ec);
+    if (ec) {
+        std::cerr << "ls: cannot open directory '" << dir.string() << "': " << ec.message() << '\n';
+        return;
+    }
+
+    fs::directory_iterator end;
+    while (it != end) {
+        const auto& entry = *it;
+
+        // Filter hidden files first -- if we can't even read the name, skip.
+        std::error_code pathEc;
+        fs::path entryPath = entry.path();
+        if (!opts.all && isHidden(entryPath)) {
+            it.increment(ec);
+            if (ec) {
+                std::cerr << "ls: cannot advance iterator in '" << dir.string() << "': " << ec.message() << '\n';
+                return;
             }
+            continue;
+        }
 
-            DirEntry de;
-            de.path = entry.path();
-            de.status = entry.status();
-            de.is_symlink = fs::is_symlink(entry.symlink_status());
-            de.is_hidden = isHidden(entry.path());
+        // status() -- non-throwing
+        std::error_code statusEc;
+        fs::file_status st = entry.status(statusEc);
 
-            if (fs::is_regular_file(de.status)) {
-                de.size = entry.file_size();
-            } else {
+        // symlink_status() -- non-throwing
+        std::error_code symlinkEc;
+        fs::file_status symst = entry.symlink_status(symlinkEc);
+
+        // Skip the entry outright if the most basic stat failed (file doesn't exist anymore).
+        if (statusEc && symlinkEc) {
+            std::cerr << "ls: cannot stat '" << entryPath.string() << "': " << statusEc.message() << '\n';
+            it.increment(ec);
+            if (ec) {
+                std::cerr << "ls: cannot advance iterator in '" << dir.string() << "': " << ec.message() << '\n';
+                return;
+            }
+            continue;
+        }
+
+        DirEntry de;
+        de.path = entryPath;
+        de.status = st;
+        de.is_symlink = !symlinkEc && fs::is_symlink(symst);
+        de.is_hidden = isHidden(entryPath);
+
+        // file_size() -- non-throwing
+        if (!statusEc && fs::is_regular_file(st)) {
+            std::error_code sizeEc;
+            de.size = entry.file_size(sizeEc);
+            if (sizeEc) {
                 de.size = 0;
             }
-
-            de.mtime = entry.last_write_time();
-
-            try {
-                de.nlink = entry.hard_link_count();
-            } catch (...) {
-                de.nlink = 1;
-            }
-
-            de.owner = "";
-            out.push_back(std::move(de));
+        } else {
+            de.size = 0;
         }
-    } catch (const fs::filesystem_error& e) {
-        std::cerr << "ls: cannot access '" << dir.string() << "': " << e.what() << '\n';
+
+        // last_write_time() -- non-throwing
+        std::error_code mtimeEc;
+        de.mtime = entry.last_write_time(mtimeEc);
+        if (mtimeEc) {
+            std::cerr << "ls: cannot stat '" << entryPath.string() << "' (mtime): " << mtimeEc.message() << '\n';
+            de.mtime = fs::file_time_type::clock::now();  // fallback
+        }
+
+        // hard_link_count() -- non-throwing
+        std::error_code nlinkEc;
+        de.nlink = entry.hard_link_count(nlinkEc);
+        if (nlinkEc) {
+            de.nlink = 1;
+        }
+
+        de.owner = "";
+        out.push_back(std::move(de));
+
+        it.increment(ec);
+        if (ec) {
+            std::cerr << "ls: cannot advance iterator in '" << dir.string() << "': " << ec.message() << '\n';
+            return;
+        }
     }
 }
 
@@ -538,27 +589,40 @@ std::vector<DirEntry> listDirectory(const fs::path& dir, const LsOptions& opts, 
     std::vector<DirEntry> entries;
 
     if (!fs::is_directory(dir)) {
-        try {
-            DirEntry de;
-            de.path = dir;
-            de.status = fs::status(dir);
-            de.is_symlink = fs::is_symlink(fs::symlink_status(dir));
-            de.is_hidden = isHidden(dir);
-
-            if (fs::is_regular_file(de.status)) {
-                de.size = fs::file_size(dir);
-            } else {
-                de.size = 0;
-            }
-
-            de.mtime = fs::last_write_time(dir);
-            de.nlink = 1;
-            de.owner = "";
-            entries.push_back(std::move(de));
-        } catch (const fs::filesystem_error& e) {
-            std::cerr << "ls: cannot access '" << dir.string() << "': " << e.what() << '\n';
+        std::error_code statusEc;
+        fs::file_status st = fs::status(dir, statusEc);
+        if (statusEc) {
+            std::cerr << "ls: cannot stat '" << dir.string() << "': " << statusEc.message() << '\n';
             return entries;
         }
+
+        std::error_code symlinkEc;
+        fs::file_status symst = fs::symlink_status(dir, symlinkEc);
+
+        DirEntry de;
+        de.path = dir;
+        de.status = st;
+        de.is_symlink = !symlinkEc && fs::is_symlink(symst);
+        de.is_hidden = isHidden(dir);
+
+        if (fs::is_regular_file(st)) {
+            std::error_code sizeEc;
+            de.size = fs::file_size(dir, sizeEc);
+            if (sizeEc) de.size = 0;
+        } else {
+            de.size = 0;
+        }
+
+        std::error_code mtimeEc;
+        de.mtime = fs::last_write_time(dir, mtimeEc);
+        if (mtimeEc) {
+            std::cerr << "ls: cannot stat '" << dir.string() << "' (mtime): " << mtimeEc.message() << '\n';
+            de.mtime = fs::file_time_type::clock::now();
+        }
+
+        de.nlink = 1;
+        de.owner = "";
+        entries.push_back(std::move(de));
     } else {
         collectEntries(dir, opts, entries);
     }
