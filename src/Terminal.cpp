@@ -5,6 +5,35 @@
 #include <filesystem>
 #include <sstream>
 #include <vector>
+#include <limits>
+
+static void writeUtf8ToConsole(HANDLE hOut, const std::string& s)
+{
+    if (s.empty()) return;
+    if (hOut == INVALID_HANDLE_VALUE || hOut == nullptr) {
+        std::cout << s;
+        return;
+    }
+    DWORD mode = 0;
+    if (!GetConsoleMode(hOut, &mode)) {
+        std::cout << s;
+        return;
+    }
+    if (s.size() > static_cast<size_t>((std::numeric_limits<int>::max)())) return;
+    int wideLen = MultiByteToWideChar(CP_UTF8, 0, s.data(),
+                                      static_cast<int>(s.size()), nullptr, 0);
+    if (wideLen <= 0) {
+        std::cout << s;
+        return;
+    }
+    std::wstring wide(wideLen, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()),
+                        &wide[0], wideLen);
+    DWORD written = 0;
+    if (!WriteConsoleW(hOut, wide.c_str(), static_cast<DWORD>(wide.size()), &written, nullptr)) {
+        std::cout << s;
+    }
+}
 
 static BOOL WINAPI ConsoleCtrlHandler(DWORD ctrlType) {
     if (ctrlType == CTRL_C_EVENT) {
@@ -197,6 +226,11 @@ Terminal::Terminal()
 
     m_originalCP = GetConsoleCP();
     m_originalOutputCP = GetConsoleOutputCP();
+    // Set the input code page to UTF-8. The Windows console host will then
+    // encode non-ASCII key events as UTF-8 byte sequences, delivered as two
+    // (or more) separate KEY_EVENT records with uChar.UnicodeChar set to
+    // each byte value. readLineRaw() reassembles these byte pairs back into
+    // proper UTF-8 characters before storing in m_inputBuffer.
     SetConsoleCP(CP_UTF8);
     SetConsoleOutputCP(CP_UTF8);
 
@@ -272,9 +306,9 @@ std::string Terminal::printPrompt() const
     const std::string display = formatPromptPath(raw);
 
     if (m_vtEnabled) {
-        std::cout << commands::BOLD_BLUE << display << commands::RESET << "> ";
+        writeUtf8ToConsole(m_hConsole, std::string(commands::BOLD_BLUE) + display + commands::RESET + "> ");
     } else {
-        std::cout << display << "> ";
+        writeUtf8ToConsole(m_hConsole, display + "> ");
     }
     return display + "> ";
 }
@@ -309,13 +343,13 @@ void Terminal::restoreRawInput()
 
 void Terminal::refreshLine() const
 {
-    std::cout << "\r\x1b[K";
+    writeUtf8ToConsole(m_hConsole, "\r\x1b[K");
     const std::string prompt = printPrompt();
-    std::cout << m_inputBuffer;
+    writeUtf8ToConsole(m_hConsole, m_inputBuffer);
     size_t col = 1
                + displayWidth(prompt)
                + displayWidth(m_inputBuffer, m_cursorPos);
-    std::cout << "\x1b[" << col << "G";
+    writeUtf8ToConsole(m_hConsole, "\x1b[" + std::to_string(col) + "G");
     std::cout.flush();
 }
 
@@ -331,7 +365,7 @@ std::string Terminal::readLineRaw()
 
     while (true) {
         if (!ReadConsoleInput(m_hInput, &record, 1, &count)) {
-            std::cout << '\n';
+            writeUtf8ToConsole(m_hConsole, "\n");
             return m_inputBuffer;
         }
 
@@ -345,7 +379,7 @@ std::string Terminal::readLineRaw()
         if (vk == VK_RETURN) {
             m_inHistoryRecall = false;
             m_historyIndex = 0;
-            std::cout << '\n';
+            writeUtf8ToConsole(m_hConsole, "\n");
             return m_inputBuffer;
         }
 
@@ -368,7 +402,7 @@ std::string Terminal::readLineRaw()
         bool ctrl = (record.Event.KeyEvent.dwControlKeyState & (LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED)) != 0;
 
         if (vk == 'C' && ctrl) {
-            std::cout << "^C\n";
+            writeUtf8ToConsole(m_hConsole, "^C\n");
             m_inputBuffer.clear();
             m_cursorPos = 0;
             return std::string(1, kCtrlCSentinel);
@@ -414,33 +448,104 @@ std::string Terminal::readLineRaw()
             continue;
         }
 
-        if (wc >= 0xD800 && wc <= 0xDBFF) {
-            pendingHigh = wc;
-            continue;
-        }
-
-        if (wc >= 0xDC00 && wc <= 0xDFFF) {
-            if (pendingHigh != 0) {
-                uint32_t cp = 0x10000 + ((pendingHigh - 0xD800) << 10) + (wc - 0xDC00);
-                std::string utf8 = utf32ToUtf8(cp);
-                m_inputBuffer.insert(m_cursorPos, utf8);
-                m_cursorPos += utf8.length();
-                m_lastWasTab = false;
-                refreshLine();
-            }
-            pendingHigh = 0;
-            continue;
-        }
-
         pendingHigh = 0;
 
-        if (wc != L'\0') {
-            std::string utf8 = utf32ToUtf8(static_cast<uint32_t>(wc));
+        if (wc == L'\0') {
+            continue;
+        }
+
+        // With SetConsoleCP(CP_UTF8), the Windows console host encodes each
+        // non-ASCII keystroke as a UTF-8 byte sequence and delivers each
+        // byte as a separate KEY_EVENT whose uChar.UnicodeChar is set to
+        // the byte value (in 0x00-0xFF range, NOT a true Unicode code point).
+        // We reassemble these into the proper UTF-8 string.
+        //
+        // For a 2-byte UTF-8 sequence (e.g. ò = 0xC3 0xB2): first event has
+        // wc in 0xC2-0xDF, second has wc in 0x80-0xBF. The two events are
+        // delivered back-to-back.
+        //
+        // For 3-byte UTF-8 (e.g. € = 0xE2 0x82 0xAC): first event wc in
+        // 0xE0-0xEF, then two continuation events wc in 0x80-0xBF.
+        //
+        // For 4-byte UTF-8 (e.g. 𝛑 = 0xF0 0x9D 0x9B 0x91): wc in 0xF0-0xF4
+        // followed by three continuation events.
+        //
+        // ASCII (wc < 0x80) is a single self-contained event.
+
+        if (wc < 0x80) {
+            // ASCII: just insert directly.
+            std::string utf8(1, static_cast<char>(wc));
+            m_inputBuffer.insert(m_cursorPos, utf8);
+            m_cursorPos += utf8.length();
+            m_lastWasTab = false;
+            refreshLine();
+            continue;
+        }
+
+        // For multi-byte UTF-8, the console delivers each byte as a separate
+        // WCHAR. We need to figure out the sequence length from the first byte
+        // and consume the right number of subsequent events.
+        // (In practice, conhost delivers all the bytes of a single keystroke
+        // back-to-back, so we can just consume them from the input queue
+        // synchronously here. This is the only safe approach because the
+        // input is delivered in a tight burst.)
+        if (wc < 0xC0) {
+            // Stray continuation byte — skip it.
+            continue;
+        }
+
+        size_t seqLen = 0;
+        if      (wc < 0xE0) seqLen = 2;
+        else if (wc < 0xF0) seqLen = 3;
+        else if (wc < 0xF8) seqLen = 4;
+        else {
+            // Invalid lead byte — skip it.
+            continue;
+        }
+
+        // Build the UTF-8 sequence. We use PeekConsoleInput + ReadConsoleInput
+        // to pull the remaining bytes of this sequence from the queue WITHOUT
+        // blocking (PeekConsoleInput returns immediately).
+        std::string utf8;
+        utf8.push_back(static_cast<char>(wc));
+
+        size_t bytesNeeded = seqLen - 1;
+        while (bytesNeeded > 0) {
+            // Peek at the next event(s) to see if more UTF-8 continuation
+            // bytes are waiting in the queue.
+            INPUT_RECORD peekRec;
+            DWORD peekCount = 0;
+            if (!PeekConsoleInput(m_hInput, &peekRec, 1, &peekCount) || peekCount == 0) {
+                break;
+            }
+            if (peekRec.EventType != KEY_EVENT || !peekRec.Event.KeyEvent.bKeyDown) {
+                // Not a continuation byte — stop reading and let the main loop
+                // handle this event on the next iteration.
+                break;
+            }
+            WCHAR peekWc = peekRec.Event.KeyEvent.uChar.UnicodeChar;
+            if (peekWc < 0x80 || peekWc > 0xBF) {
+                // Not a continuation byte — leave it for the main loop.
+                break;
+            }
+            // It IS a continuation byte; consume it.
+            DWORD consumeCount = 0;
+            if (!ReadConsoleInput(m_hInput, &peekRec, 1, &consumeCount)) {
+                break;
+            }
+            utf8.push_back(static_cast<char>(peekWc));
+            --bytesNeeded;
+        }
+
+        if (utf8.length() == seqLen) {
             m_inputBuffer.insert(m_cursorPos, utf8);
             m_cursorPos += utf8.length();
             m_lastWasTab = false;
             refreshLine();
         }
+        // If we couldn't get a full UTF-8 sequence (e.g. the events arrived
+        // out of order, or PeekConsoleInput is failing for some reason), just
+        // drop the partial input rather than inserting garbage.
     }
 }
 
@@ -556,13 +661,13 @@ std::string Terminal::longestCommonPrefix(const std::vector<std::string>& items)
 
 void Terminal::displayCandidates(const std::vector<std::string>& candidates) const
 {
-    std::cout << '\n';
+    writeUtf8ToConsole(m_hConsole, "\n");
     for (const auto& c : candidates) {
-        std::cout << c << '\n';
+        writeUtf8ToConsole(m_hConsole, c + "\n");
     }
-    std::cout << '\n';
+    writeUtf8ToConsole(m_hConsole, "\n");
     printPrompt();
-    std::cout << m_inputBuffer;
+    writeUtf8ToConsole(m_hConsole, m_inputBuffer);
     std::cout.flush();
 }
 
@@ -639,7 +744,7 @@ void Terminal::waitForForegroundJob()
             bool ctrl = (rec.Event.KeyEvent.dwControlKeyState & (LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED)) != 0;
             if (vk == 'C' && ctrl) {
                 ReadConsoleInput(m_hInput, &rec, 1, &count);
-                std::cout << "^C\n";
+                writeUtf8ToConsole(m_hConsole, "^C\n");
                 m_fgJob.interrupt();
             }
         }
@@ -674,7 +779,8 @@ const char* ascii_art =
     "                                                            [0m\n"
     "                    Built with ❤️ by Rocket!\n"
     ;
-    std::cout << ascii_art << std::endl;
+    writeUtf8ToConsole(m_hConsole, ascii_art);
+    writeUtf8ToConsole(m_hConsole, "\n");
 
     bool raw = setupRawInput();
     if (raw) {
@@ -713,7 +819,7 @@ const char* ascii_art =
             std::string line;
             if (!std::getline(std::cin, line)) {
                 // EOF reached
-                std::cout << '\n';
+                writeUtf8ToConsole(m_hConsole, "\n");
                 break;
             }
 
