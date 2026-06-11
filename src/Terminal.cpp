@@ -252,12 +252,14 @@ Terminal::Terminal()
     m_parser.registerCommand("pop",  [](const commands::Args& a) { commands::pop(a); });
     m_parser.registerCommand("slots", [](const commands::Args& a) { commands::slots(a); });
     m_parser.registerCommand("more", [](const commands::Args& a) { commands::more(a); });
+    m_parser.registerCommand("mkdir", [](const commands::Args& a) { commands::mkdir(a); });
 
     m_parser.registerPipelineCommand("cat",  [](const commands::Args& a, std::ostream& out, std::istream& in) { commands::cat(a, out, in); });
     m_parser.registerPipelineCommand("grep", [](const commands::Args& a, std::ostream& out, std::istream& in) { commands::grep(a, out, in); });
     m_parser.registerPipelineCommand("tail", [](const commands::Args& a, std::ostream& out, std::istream& in) { commands::tail(a, out, in); });
     m_parser.registerPipelineCommand("echo", [](const commands::Args& a, std::ostream& out, std::istream& in) { commands::echo(a, out, in); });
     m_parser.registerPipelineCommand("more", [](const commands::Args& a, std::ostream& out, std::istream& in) { commands::more(a, out, in); });
+    m_parser.registerPipelineCommand("mkdir", [](const commands::Args& a, std::ostream& out, std::istream& in) { commands::mkdir(a, out, in); });
 }
 
 Terminal::~Terminal()

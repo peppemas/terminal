@@ -34,6 +34,7 @@ namespace commands {
     void pop (const Args& args, std::ostream& out, std::istream& in);
     void slots(const Args& args, std::ostream& out, std::istream& in);
     void more(const Args& args, std::ostream& out, std::istream& in);
+    void mkdir(const Args& args, std::ostream& out, std::istream& in);
 
     // Legacy backward-compatible wrappers
     inline void ls  (const Args& args) { ls(args, std::cout, std::cin); }
@@ -52,6 +53,7 @@ namespace commands {
     inline void pop (const Args& args) { pop (args, std::cout, std::cin); }
     inline void slots(const Args& args) { slots(args, std::cout, std::cin); }
     inline void more(const Args& args) { more(args, std::cout, std::cin); }
+    inline void mkdir(const Args& args) { mkdir(args, std::cout, std::cin); }
 
 } // namespace commands
 

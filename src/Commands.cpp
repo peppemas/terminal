@@ -53,6 +53,13 @@ struct RmOptions {
     std::vector<fs::path> paths;
 };
 
+struct MkdirOptions {
+    bool parents = false;
+    bool verbose = false;
+    bool help    = false;
+    std::vector<fs::path> paths;
+};
+
 struct DirEntry {
     fs::path path;
     fs::file_status status;
@@ -249,6 +256,43 @@ void printTailHelp(std::ostream& out) {
               << "  tail -n +15 file.txt     lines 15 through end of file.txt\n"
               << "  tail -c 25 file.txt      last 25 bytes of file.txt\n"
               << "  tail -q file1 file2      no headers, just concatenated tails\n";
+}
+
+// ------------------------------------------------------------------
+// mkdir helpers
+// ------------------------------------------------------------------
+
+MkdirOptions parseMkdirArgs(const commands::Args& args) {
+    MkdirOptions opts;
+    for (std::size_t i = 1; i < args.size(); ++i) {
+        const std::string& token = args[i];
+        if (token == "--help") {
+            opts.help = true;
+            return opts;
+        }
+        if (token == "-p" || token == "--parents") {
+            opts.parents = true;
+            continue;
+        }
+        if (token == "-v" || token == "--verbose") {
+            opts.verbose = true;
+            continue;
+        }
+        if (!token.empty() && token[0] == '-') {
+            std::cerr << "mkdir: invalid option -- '" << token << "'\n";
+            continue;
+        }
+        opts.paths.push_back(token);
+    }
+    return opts;
+}
+
+void printMkdirHelp(std::ostream& out) {
+    out << "usage: mkdir [OPTION]... DIRECTORY...\n"
+        << "Create the DIRECTORY(ies), if they do not already exist.\n\n"
+        << "  -p, --parents   make parent directories as needed\n"
+        << "  -v, --verbose   print a message for each created directory\n"
+        << "      --help      display this help and exit\n";
 }
 
 bool shouldPrintHeader(std::size_t totalFiles, const TailOptions& opts) {
@@ -780,6 +824,49 @@ void commands::rm(const Args& args, std::ostream& out, std::istream& /*in*/)
         }
 
         if (moveToRecycleBin(target, opts.recursive, std::cerr)) {
+        }
+    }
+}
+
+void commands::mkdir(const Args& args, std::ostream& out, std::istream& /*in*/)
+{
+    MkdirOptions opts = parseMkdirArgs(args);
+    if (opts.help) {
+        printMkdirHelp(out);
+        return;
+    }
+    if (opts.paths.empty()) {
+        std::cerr << "mkdir: missing operand\n";
+        return;
+    }
+
+    for (const auto& p : opts.paths) {
+        std::error_code ec;
+        if (opts.parents) {
+            bool created = fs::create_directories(p, ec);
+            if (ec && ec != std::errc::file_exists) {
+                std::cerr << "mkdir: cannot create directory '" << p.string()
+                          << "': " << ec.message() << "\n";
+                continue;
+            }
+            if (opts.verbose && created) {
+                out << p.string() << "\n";
+            }
+        } else {
+            bool created = fs::create_directory(p, ec);
+            if (ec) {
+                if (ec == std::errc::file_exists) {
+                    std::cerr << "mkdir: cannot create directory '" << p.string()
+                              << "': File exists\n";
+                } else {
+                    std::cerr << "mkdir: cannot create directory '" << p.string()
+                              << "': " << ec.message() << "\n";
+                }
+                continue;
+            }
+            if (opts.verbose) {
+                out << p.string() << "\n";
+            }
         }
     }
 }
