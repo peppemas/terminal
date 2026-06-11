@@ -95,13 +95,10 @@ bool CommandParser::execute(const std::string& line, std::ostream& out) const
 
 void CommandParser::execute(const std::string& line) const
 {
-    if (!execute(line, std::cin, std::cout)) {
-        std::istringstream iss(line);
-        std::string cmd;
-        if (iss >> cmd) {
-            std::cerr << "command not found: " << cmd << '\n';
-        }
-    }
+    // The inner execute() -> executePipeline() already prints the
+    // "command not found" error to std::cerr when no handler matches
+    // and CommandResolver::resolve() fails. We just forward the call.
+    execute(line, std::cin, std::cout);
 }
 
 bool CommandParser::hasCommand(const std::string& name) const
