@@ -4,7 +4,7 @@ project(terminal)
 set(CMAKE_CXX_STANDARD 20)
 
 add_executable(terminal
-    main.cpp
+    src/main.cpp
     src/Terminal.cpp
     src/CommandParser.cpp
     src/Commands.cpp
