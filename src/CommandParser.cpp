@@ -101,6 +101,59 @@ void CommandParser::execute(const std::string& line) const
     execute(line, std::cin, std::cout);
 }
 
+CommandParser::CommandDispatch CommandParser::dispatch(const std::string& line) const
+{
+    CommandDispatch d;
+    if (line.empty()) {
+        d.action = CommandDispatch::Action::None;
+        return d;
+    }
+
+    auto tokenStages = shell::tokenizePipeline(line);
+    std::vector<std::vector<std::string>> stages;
+    stages.reserve(tokenStages.size());
+    for (const auto& ts : tokenStages) {
+        stages.push_back(GlobExpander::expand(ts));
+    }
+    if (stages.empty()) {
+        d.action = CommandDispatch::Action::None;
+        return d;
+    }
+
+    // Only handle single-stage commands here. Multi-stage pipelines
+    // must still go through executePipeline() (which auto-executes).
+    if (stages.size() != 1) {
+        d.action = CommandDispatch::Action::RunBuiltin;
+        return d;
+    }
+
+    const auto& argv = stages[0];
+    if (argv.empty()) {
+        d.action = CommandDispatch::Action::Failed;
+        d.message = "syntax error: empty command";
+        return d;
+    }
+    const std::string& cmd = argv[0];
+
+    // Check builtin first
+    if (m_registry.count(cmd) || m_pipelineRegistry.count(cmd)) {
+        d.action = CommandDispatch::Action::RunBuiltin;
+        return d;
+    }
+
+    // Try to resolve as external
+    auto resolved = CommandResolver::resolve(cmd, argv);
+    if (resolved) {
+        d.action = CommandDispatch::Action::RunExternal;
+        d.external = std::move(*resolved);
+        return d;
+    }
+
+    d.action = CommandDispatch::Action::NotFound;
+    d.message = "command not found: " + cmd;
+    return d;
+}
+
 bool CommandParser::hasCommand(const std::string& name) const
 {
     return m_registry.find(name) != m_registry.end() ||

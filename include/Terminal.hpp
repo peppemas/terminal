@@ -39,6 +39,9 @@ private:
     void moveCursorToPrevSpace();
     void moveCursorToNextSpace();
 
+    // --- External command execution ---
+    int runExternalCommand(const CommandResolver::ResolutionResult& resolved);
+
     bool m_vtEnabled{false};
     HANDLE m_hConsole{INVALID_HANDLE_VALUE};
     DWORD m_originalMode{0};
@@ -56,7 +59,6 @@ private:
     static constexpr size_t MAX_HISTORY_SIZE = 1000;
     static constexpr char kCtrlCSentinel = '\x03';
 
-    void waitForForegroundJob();
     ForegroundJob m_fgJob;
 
     std::vector<std::string> m_history;

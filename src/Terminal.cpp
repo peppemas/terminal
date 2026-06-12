@@ -6,6 +6,7 @@
 #include <sstream>
 #include <vector>
 #include <limits>
+#include <atomic>
 
 static void writeUtf8ToConsole(HANDLE hOut, const std::string& s)
 {
@@ -35,8 +36,13 @@ static void writeUtf8ToConsole(HANDLE hOut, const std::string& s)
     }
 }
 
+// Set by the ctrl handler (which runs on its own thread) when the user
+// presses Ctrl+C / Ctrl+Break while a foreground child is running.
+static std::atomic<bool> g_interruptRequested{false};
+
 static BOOL WINAPI ConsoleCtrlHandler(DWORD ctrlType) {
-    if (ctrlType == CTRL_C_EVENT) {
+    if (ctrlType == CTRL_C_EVENT || ctrlType == CTRL_BREAK_EVENT) {
+        g_interruptRequested = true;
         return TRUE; // swallow the signal so the shell never terminates
     }
     return FALSE;
@@ -208,20 +214,20 @@ static size_t displayWidth(const std::string& s)
 Terminal::Terminal()
     : m_hConsole{INVALID_HANDLE_VALUE}, m_originalMode{0}, m_vtEnabled{false}
 {
+    // VT mode is best-effort: stdout may be redirected to a pipe/file, in
+    // which case we still must register the ctrl handler and the commands.
     m_hConsole = GetStdHandle(STD_OUTPUT_HANDLE);
-    if (m_hConsole == INVALID_HANDLE_VALUE) {
-        return;
+    if (m_hConsole != INVALID_HANDLE_VALUE && GetConsoleMode(m_hConsole, &m_originalMode)) {
+        DWORD newMode = m_originalMode | ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+        if (SetConsoleMode(m_hConsole, newMode)) {
+            m_vtEnabled = true;
+        }
     }
 
-    if (!GetConsoleMode(m_hConsole, &m_originalMode)) {
-        return;
-    }
-
-    DWORD newMode = m_originalMode | ENABLE_VIRTUAL_TERMINAL_PROCESSING;
-    if (SetConsoleMode(m_hConsole, newMode)) {
-        m_vtEnabled = true;
-    }
-
+    // Clear any inherited "ignore Ctrl+C" flag (a parent that called
+    // SetConsoleCtrlHandler(NULL, TRUE) passes it on to us, and we would
+    // pass it on to our children, leaving them immune to Ctrl+C).
+    SetConsoleCtrlHandler(nullptr, FALSE);
     SetConsoleCtrlHandler(ConsoleCtrlHandler, TRUE);
 
     m_originalCP = GetConsoleCP();
@@ -268,7 +274,7 @@ Terminal::~Terminal()
     SetConsoleOutputCP(m_originalOutputCP);
     SetConsoleCtrlHandler(ConsoleCtrlHandler, FALSE);
     restoreRawInput();
-    if (m_hConsole != INVALID_HANDLE_VALUE) {
+    if (m_vtEnabled) {
         SetConsoleMode(m_hConsole, m_originalMode);
     }
 }
@@ -726,31 +732,47 @@ void Terminal::moveCursorToNextSpace()
     refreshLine();
 }
 
-void Terminal::waitForForegroundJob()
+int Terminal::runExternalCommand(const CommandResolver::ResolutionResult& resolved)
 {
+    if (!m_fgJob.start(resolved.commandLine)) {
+        std::cerr << "failed to start: " << resolved.executable.string() << '\n';
+        return -1;
+    }
+
+    // Hand the console back to cooked mode while the child runs. With
+    // ENABLE_PROCESSED_INPUT restored, the console itself turns Ctrl+C into
+    // a CTRL_C_EVENT delivered to every process attached to it — the child
+    // gets it directly (like in cmd/PowerShell), and the shell's own ctrl
+    // handler swallows it and records the request so we can escalate if the
+    // child refuses to die. This also gives interactive children normal
+    // line-buffered, echoed stdin.
+    g_interruptRequested = false;
+    restoreRawInput();
+
     while (m_fgJob.isActive()) {
         DWORD wait = WaitForSingleObject(m_fgJob.hProcess, 100);
-        if (wait == WAIT_OBJECT_0) {
-            m_fgJob.reset();
+        if (wait != WAIT_TIMEOUT) {
+            break;  // child exited (or wait error)
+        }
+
+        if (g_interruptRequested) {
+            // The child received the same Ctrl+C from the console. Give it a
+            // moment to exit politely, then escalate to CTRL_BREAK, then to
+            // TerminateProcess.
+            if (m_fgJob.wait(1000)) { break; }
+            m_fgJob.interruptBreak();
+            if (m_fgJob.wait(1000)) { break; }
+            m_fgJob.terminate();
+            m_fgJob.wait(INFINITE);
             break;
         }
-
-        INPUT_RECORD rec;
-        DWORD count = 0;
-        if (!PeekConsoleInput(m_hInput, &rec, 1, &count) || count == 0) {
-            continue;
-        }
-
-        if (rec.EventType == KEY_EVENT && rec.Event.KeyEvent.bKeyDown) {
-            WORD vk = rec.Event.KeyEvent.wVirtualKeyCode;
-            bool ctrl = (rec.Event.KeyEvent.dwControlKeyState & (LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED)) != 0;
-            if (vk == 'C' && ctrl) {
-                ReadConsoleInput(m_hInput, &rec, 1, &count);
-                writeUtf8ToConsole(m_hConsole, "^C\n");
-                m_fgJob.interrupt();
-            }
-        }
     }
+
+    DWORD exitCode = 0;
+    GetExitCodeProcess(m_fgJob.hProcess, &exitCode);
+    m_fgJob.reset();
+    setupRawInput();
+    return static_cast<int>(exitCode);
 }
 
 void Terminal::run()
@@ -806,10 +828,27 @@ const char* ascii_art =
                 break;
             }
 
-            // Use the parser for both built-ins and external commands.
-            // The parser will try: built-in -> CommandResolver::resolve() -> ExternalExecutor.
+            // Use dispatch to decide what to do: built-in, external, or not found.
             try {
-                m_parser.execute(line);
+                auto d = m_parser.dispatch(line);
+                switch (d.action) {
+                    case CommandParser::CommandDispatch::Action::None:
+                        break;
+                    case CommandParser::CommandDispatch::Action::RunBuiltin:
+                        // For built-in commands (including multi-stage pipelines), fall back
+                        // to the legacy execute() path.
+                        m_parser.execute(line);
+                        break;
+                    case CommandParser::CommandDispatch::Action::RunExternal:
+                        runExternalCommand(d.external);
+                        break;
+                    case CommandParser::CommandDispatch::Action::NotFound:
+                        std::cerr << d.message << '\n';
+                        break;
+                    case CommandParser::CommandDispatch::Action::Failed:
+                        std::cerr << d.message << '\n';
+                        break;
+                }
             } catch (const std::exception& e) {
                 std::cerr << "error: " << e.what() << '\n';
             }
@@ -829,8 +868,25 @@ const char* ascii_art =
                 break;
             }
 
+            // Use dispatch to decide what to do: built-in, external, or not found.
             try {
-                m_parser.execute(line);
+                auto d = m_parser.dispatch(line);
+                switch (d.action) {
+                    case CommandParser::CommandDispatch::Action::None:
+                        break;
+                    case CommandParser::CommandDispatch::Action::RunBuiltin:
+                        m_parser.execute(line);
+                        break;
+                    case CommandParser::CommandDispatch::Action::RunExternal:
+                        runExternalCommand(d.external);
+                        break;
+                    case CommandParser::CommandDispatch::Action::NotFound:
+                        std::cerr << d.message << '\n';
+                        break;
+                    case CommandParser::CommandDispatch::Action::Failed:
+                        std::cerr << d.message << '\n';
+                        break;
+                }
             } catch (const std::exception& e) {
                 std::cerr << "error: " << e.what() << '\n';
             }
