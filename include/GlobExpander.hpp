@@ -10,9 +10,9 @@
 class GlobExpander {
 public:
     static std::vector<std::string> expand(const std::vector<shell::Token>& tokens);
+    static bool matchPattern(const std::string& pattern, const std::string& name);
 
 private:
-    static bool matchPattern(const std::string& pattern, const std::string& name);
     static std::vector<std::string> matchInCurrentDirectory(const std::string& pattern);
 };
 

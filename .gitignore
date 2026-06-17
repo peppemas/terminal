@@ -1,5 +1,6 @@
 cmake-build-debug
 .rocket
 .idea
+.kiro
 build
 coder.log

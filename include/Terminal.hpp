@@ -10,6 +10,7 @@
 #include <unordered_map>
 
 #include "CommandParser.hpp"
+#include "Config.hpp"
 #include "ForegroundJob.hpp"
 
 class Terminal {
@@ -20,24 +21,30 @@ public:
     void run();
 
 private:
-    std::string printPrompt() const;
+    std::string getPromptString() const;
+    void printPrompt() const;
 
     bool setupRawInput();
     void restoreRawInput();
     std::string readLineRaw();
-    void refreshLine() const;
+    void refreshLine();
     void handleTab();
     void replaceToken(size_t start, const std::string& oldToken, const std::string& replacement);
     std::vector<std::string> getCommandCandidates(const std::string& prefix) const;
     std::vector<std::string> getPathCandidates(const std::string& token) const;
     std::string longestCommonPrefix(const std::vector<std::string>& items) const;
-    void displayCandidates(const std::vector<std::string>& candidates) const;
+    void displayCandidates(const std::vector<std::string>& candidates);
 
     // --- History & word navigation helpers ---
     void addToHistory(const std::string& line);
     void recallHistory(int direction);
+    void loadHistory();
+    void saveHistory();
     void moveCursorToPrevSpace();
     void moveCursorToNextSpace();
+
+    // --- Line processing (shared between raw/cooked loops) ---
+    void processLine(const std::string& line);
 
     // --- External command execution ---
     int runExternalCommand(const CommandResolver::ResolutionResult& resolved);
@@ -56,7 +63,6 @@ private:
     bool m_lastWasTab{false};
 
     // --- History & word navigation ---
-    static constexpr size_t MAX_HISTORY_SIZE = 1000;
     static constexpr char kCtrlCSentinel = '\x03';
 
     ForegroundJob m_fgJob;
@@ -68,6 +74,10 @@ private:
 
     HANDLE m_hInput{INVALID_HANDLE_VALUE};
     DWORD m_originalInputMode{0};
+
+    // --- Prompt caching ---
+    mutable std::string m_cachedPrompt;
+    mutable bool m_promptDirty{true};
 };
 
 #endif // TERMINAL_TERMINAL_HPP

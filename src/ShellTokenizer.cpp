@@ -11,13 +11,14 @@ bool isWs(char c)   { return c == ' ' || c == '\t'; }
 
 } // namespace
 
-std::vector<std::vector<Token>> tokenizePipeline(const std::string& line) {
-    std::vector<std::vector<Token>> stages;
+TokenizeResult tokenizePipeline(const std::string& line) {
+    TokenizeResult result;
     std::vector<Token> current;
     std::string token;
     bool inToken = false;
     bool tokenQuoted = false;
-    char quote = 0; // 0, '\'' or '"'
+    char quote = 0;            // 0, '\'' or '"'
+    std::size_t quoteOpenPos = 0; // position of the opening quote character
 
     auto pushToken = [&]() {
         if (inToken) {
@@ -30,7 +31,7 @@ std::vector<std::vector<Token>> tokenizePipeline(const std::string& line) {
 
     auto pushStage = [&]() {
         pushToken();
-        stages.push_back(std::move(current));
+        result.stages.push_back(std::move(current));
         current.clear();
     };
 
@@ -57,6 +58,7 @@ std::vector<std::vector<Token>> tokenizePipeline(const std::string& line) {
 
         if (c == '\'' || c == '"') {
             quote = c;
+            quoteOpenPos = i;
             inToken = true;
             tokenQuoted = true;
             continue;
@@ -76,11 +78,17 @@ std::vector<std::vector<Token>> tokenizePipeline(const std::string& line) {
         inToken = true;
     }
 
-    // unterminated quote: treat as end of input
+    // Check for unterminated quote at end of input
+    if (quote != 0) {
+        result.error = "unterminated " + std::string(quote == '"' ? "double" : "single")
+                     + " quote at position " + std::to_string(quoteOpenPos + 1);
+    }
+
+    // Still push whatever was parsed so far (partial results)
     quote = 0;
     pushStage();
 
-    return stages;
+    return result;
 }
 
 } // namespace shell

@@ -3,6 +3,7 @@
 #ifndef TERMINAL_SHELLTOKENIZER_HPP
 #define TERMINAL_SHELLTOKENIZER_HPP
 
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -14,6 +15,13 @@ struct Token {
                        // single or double quotes. Disables glob expansion.
 };
 
+// Result of tokenizing a pipeline. Contains the parsed stages and an optional
+// error message (e.g. for unterminated quotes).
+struct TokenizeResult {
+    std::vector<std::vector<Token>> stages;
+    std::optional<std::string> error; // set if unterminated quote, includes position
+};
+
 // Splits a line into a vector of stages. Each stage is a vector of argv tokens.
 // - Whitespace separates tokens (unless inside quotes).
 // - '|' outside of quotes ends the current stage and starts a new one.
@@ -21,10 +29,12 @@ struct Token {
 //   No escapes inside single quotes.
 // - Double quotes ("...") preserve everything literally except \" and \\.
 // - Outside quotes, \ escapes the next character.
-// Returns the parsed stages. An empty input line returns an empty vector.
+// Returns a TokenizeResult. An empty input line returns empty stages with no error.
 // If a stage is empty (e.g. "cmd1 | | cmd2"), it is still included as an
 // empty vector in the result; the executor should detect that and report an error.
-std::vector<std::vector<shell::Token>> tokenizePipeline(const std::string& line);
+// If input ends while inside a quoted string, result.error is set with the
+// position of the opening quote character.
+TokenizeResult tokenizePipeline(const std::string& line);
 
 } // namespace shell
 

@@ -3,10 +3,12 @@
 
 #include <iostream>
 #include <filesystem>
+#include <fstream>
 #include <sstream>
 #include <vector>
 #include <limits>
 #include <atomic>
+#include <cstdlib>
 
 static void writeUtf8ToConsole(HANDLE hOut, const std::string& s)
 {
@@ -48,26 +50,7 @@ static BOOL WINAPI ConsoleCtrlHandler(DWORD ctrlType) {
     return FALSE;
 }
 
-static std::string utf32ToUtf8(uint32_t cp)
-{
-    std::string result;
-    if (cp <= 0x7F) {
-        result.push_back(static_cast<char>(cp));
-    } else if (cp <= 0x7FF) {
-        result.push_back(static_cast<char>(0xC0 | ((cp >> 6) & 0x1F)));
-        result.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
-    } else if (cp <= 0xFFFF) {
-        result.push_back(static_cast<char>(0xE0 | ((cp >> 12) & 0x0F)));
-        result.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
-        result.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
-    } else if (cp <= 0x10FFFF) {
-        result.push_back(static_cast<char>(0xF0 | ((cp >> 18) & 0x07)));
-        result.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
-        result.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
-        result.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
-    }
-    return result;
-}
+// Intentionally removed: utf32ToUtf8 was unused dead code (C4505)
 
 static uint32_t decodeUtf8(const std::string& s, size_t pos, size_t& outBytes)
 {
@@ -240,36 +223,33 @@ Terminal::Terminal()
     SetConsoleCP(CP_UTF8);
     SetConsoleOutputCP(CP_UTF8);
 
-    // Register all command handlers
-    m_parser.registerCommand("ls",   [](const commands::Args& a) { commands::ls(a); });
-    m_parser.registerCommand("rm",   [](const commands::Args& a) { commands::rm(a); });
-    m_parser.registerCommand("cp",   [](const commands::Args& a) { commands::cp(a); });
-    m_parser.registerCommand("mv",   [](const commands::Args& a) { commands::mv(a); });
-    m_parser.registerCommand("cat",  [](const commands::Args& a) { commands::cat(a); });
-    m_parser.registerCommand("tail", [](const commands::Args& a) { commands::tail(a); });
-    m_parser.registerCommand("grep", [](const commands::Args& a) { commands::grep(a); });
-    m_parser.registerCommand("cd",   [](const commands::Args& a) { commands::cd(a); });
-    m_parser.registerCommand("clear",[](const commands::Args& a) { commands::clear(a); });
-    m_parser.registerCommand("cls",  [](const commands::Args& a) { commands::clear(a); });
-    m_parser.registerCommand("pwd",  [](const commands::Args& a) { commands::pwd(a); });
-    m_parser.registerCommand("open", [](const commands::Args& a) { commands::open(a); });
-    m_parser.registerCommand("echo", [](const commands::Args& a) { commands::echo(a); });
-    m_parser.registerCommand("push", [](const commands::Args& a) { commands::push(a); });
-    m_parser.registerCommand("pop",  [](const commands::Args& a) { commands::pop(a); });
-    m_parser.registerCommand("slots", [](const commands::Args& a) { commands::slots(a); });
-    m_parser.registerCommand("more", [](const commands::Args& a) { commands::more(a); });
-    m_parser.registerCommand("mkdir", [](const commands::Args& a) { commands::mkdir(a); });
+    // Register all command handlers (unified signature: Args, ostream&, istream&)
+    m_parser.registerCommand("ls",    commands::ls);
+    m_parser.registerCommand("rm",    commands::rm);
+    m_parser.registerCommand("cp",    commands::cp);
+    m_parser.registerCommand("mv",    commands::mv);
+    m_parser.registerCommand("cat",   commands::cat);
+    m_parser.registerCommand("tail",  commands::tail);
+    m_parser.registerCommand("grep",  commands::grep);
+    m_parser.registerCommand("cd",    commands::cd);
+    m_parser.registerCommand("clear", commands::clear);
+    m_parser.registerCommand("cls",   commands::clear);
+    m_parser.registerCommand("pwd",   commands::pwd);
+    m_parser.registerCommand("open",  commands::open);
+    m_parser.registerCommand("echo",  commands::echo);
+    m_parser.registerCommand("push",  commands::push);
+    m_parser.registerCommand("pop",   commands::pop);
+    m_parser.registerCommand("slots", commands::slots);
+    m_parser.registerCommand("more",  commands::more);
+    m_parser.registerCommand("mkdir", commands::mkdir);
 
-    m_parser.registerPipelineCommand("cat",  [](const commands::Args& a, std::ostream& out, std::istream& in) { commands::cat(a, out, in); });
-    m_parser.registerPipelineCommand("grep", [](const commands::Args& a, std::ostream& out, std::istream& in) { commands::grep(a, out, in); });
-    m_parser.registerPipelineCommand("tail", [](const commands::Args& a, std::ostream& out, std::istream& in) { commands::tail(a, out, in); });
-    m_parser.registerPipelineCommand("echo", [](const commands::Args& a, std::ostream& out, std::istream& in) { commands::echo(a, out, in); });
-    m_parser.registerPipelineCommand("more", [](const commands::Args& a, std::ostream& out, std::istream& in) { commands::more(a, out, in); });
-    m_parser.registerPipelineCommand("mkdir", [](const commands::Args& a, std::ostream& out, std::istream& in) { commands::mkdir(a, out, in); });
+    loadHistory();
 }
 
 Terminal::~Terminal()
 {
+    saveHistory();
+
     SetConsoleCP(m_originalCP);
     SetConsoleOutputCP(m_originalOutputCP);
     SetConsoleCtrlHandler(ConsoleCtrlHandler, FALSE);
@@ -308,17 +288,29 @@ static std::string formatPromptPath(const std::string& raw)
     return raw.substr(0, cut) + "..." + leaf;
 }
 
-std::string Terminal::printPrompt() const
+std::string Terminal::getPromptString() const
 {
+    if (!m_promptDirty) {
+        return m_cachedPrompt;
+    }
     const std::string raw = std::filesystem::current_path().string();
     const std::string display = formatPromptPath(raw);
+    m_cachedPrompt = display + "> ";
+    m_promptDirty = false;
+    return m_cachedPrompt;
+}
+
+void Terminal::printPrompt() const
+{
+    const std::string prompt = getPromptString();
 
     if (m_vtEnabled) {
+        // Extract display part (without "> " suffix) for coloring
+        const std::string display = prompt.substr(0, prompt.size() - 2);
         writeUtf8ToConsole(m_hConsole, std::string(commands::BOLD_BLUE) + display + commands::RESET + "> ");
     } else {
-        writeUtf8ToConsole(m_hConsole, display + "> ");
+        writeUtf8ToConsole(m_hConsole, prompt);
     }
-    return display + "> ";
 }
 
 bool Terminal::setupRawInput()
@@ -349,10 +341,17 @@ void Terminal::restoreRawInput()
     }
 }
 
-void Terminal::refreshLine() const
+void Terminal::refreshLine()
 {
     writeUtf8ToConsole(m_hConsole, "\r\x1b[K");
-    const std::string prompt = printPrompt();
+    const std::string prompt = getPromptString();
+    // Write prompt with colors
+    if (m_vtEnabled) {
+        const std::string display = prompt.substr(0, prompt.size() - 2);
+        writeUtf8ToConsole(m_hConsole, std::string(commands::BOLD_BLUE) + display + commands::RESET + "> ");
+    } else {
+        writeUtf8ToConsole(m_hConsole, prompt);
+    }
     writeUtf8ToConsole(m_hConsole, m_inputBuffer);
     size_t col = 1
                + displayWidth(prompt)
@@ -667,7 +666,7 @@ std::string Terminal::longestCommonPrefix(const std::vector<std::string>& items)
     return first;
 }
 
-void Terminal::displayCandidates(const std::vector<std::string>& candidates) const
+void Terminal::displayCandidates(const std::vector<std::string>& candidates)
 {
     writeUtf8ToConsole(m_hConsole, "\n");
     for (const auto& c : candidates) {
@@ -681,32 +680,121 @@ void Terminal::displayCandidates(const std::vector<std::string>& candidates) con
 
 void Terminal::addToHistory(const std::string& line)
 {
-    if (m_history.size() == MAX_HISTORY_SIZE) {
+    if (m_history.size() == config::MAX_HISTORY_SIZE) {
         m_history.erase(m_history.begin());
     }
     m_history.push_back(line);
 }
 
+void Terminal::loadHistory()
+{
+    // Use _dupenv_s instead of getenv for MSVC safety (C4996)
+    char* userProfile = nullptr;
+    size_t len = 0;
+    if (_dupenv_s(&userProfile, &len, "USERPROFILE") != 0 || !userProfile) {
+        return; // No USERPROFILE set, start with empty history
+    }
+
+    std::filesystem::path historyPath =
+        std::filesystem::path(userProfile) / ".terminal_history";
+    free(userProfile);
+
+    std::ifstream file(historyPath, std::ios::in);
+    if (!file.is_open()) {
+        // File doesn't exist or can't be opened — start with empty history
+        return;
+    }
+
+    std::string line;
+    try {
+        while (std::getline(file, line)) {
+            if (!line.empty()) {
+                m_history.push_back(line);
+            }
+        }
+    } catch (const std::exception& e) {
+        // Corrupted/unreadable file — warn and start with empty history
+        std::cerr << "warning: could not read history file: " << e.what() << '\n';
+        m_history.clear();
+        return;
+    }
+
+    if (file.bad()) {
+        // I/O error during read — warn and start with empty history
+        std::cerr << "warning: error reading history file, starting with empty history\n";
+        m_history.clear();
+        return;
+    }
+
+    // Trim to last config::MAX_HISTORY_SIZE entries
+    if (m_history.size() > config::MAX_HISTORY_SIZE) {
+        m_history.erase(m_history.begin(),
+                        m_history.begin() + static_cast<std::ptrdiff_t>(
+                            m_history.size() - config::MAX_HISTORY_SIZE));
+    }
+}
+
+void Terminal::saveHistory()
+{
+    // Use _dupenv_s instead of getenv for MSVC safety (C4996)
+    char* userProfile = nullptr;
+    size_t len = 0;
+    if (_dupenv_s(&userProfile, &len, "USERPROFILE") != 0 || !userProfile) {
+        return; // No USERPROFILE set, cannot save
+    }
+
+    std::filesystem::path historyPath =
+        std::filesystem::path(userProfile) / ".terminal_history";
+    free(userProfile);
+
+    std::ofstream file(historyPath, std::ios::out | std::ios::trunc);
+    if (!file.is_open()) {
+        std::cerr << "warning: could not open history file for writing: "
+                  << historyPath.string() << '\n';
+        return;
+    }
+
+    // Write the last config::MAX_HISTORY_SIZE entries
+    size_t startIdx = 0;
+    if (m_history.size() > config::MAX_HISTORY_SIZE) {
+        startIdx = m_history.size() - config::MAX_HISTORY_SIZE;
+    }
+
+    for (size_t i = startIdx; i < m_history.size(); ++i) {
+        file << m_history[i] << '\n';
+        if (file.fail()) {
+            std::cerr << "warning: failed to write history entry, stopping save\n";
+            return;
+        }
+    }
+
+    file.flush();
+    if (file.fail()) {
+        std::cerr << "warning: failed to flush history file to disk\n";
+    }
+}
+
 void Terminal::recallHistory(int direction)
 {
-    if (direction == +1) {
-        if (!m_inHistoryRecall) {
-            m_scratchBuffer = m_inputBuffer;
-            m_inHistoryRecall = true;
-            m_historyIndex = 1;
-        } else if (m_historyIndex < m_history.size()) {
-            ++m_historyIndex;
-        }
+    if (m_history.empty()) return; // Guard: empty history
+
+    if (!m_inHistoryRecall) {
+        m_inHistoryRecall = true;
+        m_scratchBuffer = m_inputBuffer;
+        m_historyIndex = 0;
+    }
+
+    if (direction > 0) { // older
+        if (m_historyIndex < m_history.size()) ++m_historyIndex;
+    } else { // newer
+        if (m_historyIndex > 0) --m_historyIndex;
+    }
+
+    if (m_historyIndex == 0) {
+        m_inputBuffer = m_scratchBuffer;
+        m_inHistoryRecall = false;
+    } else {
         m_inputBuffer = m_history[m_history.size() - m_historyIndex];
-    } else if (direction == -1) {
-        if (m_historyIndex > 1) {
-            --m_historyIndex;
-            m_inputBuffer = m_history[m_history.size() - m_historyIndex];
-        } else {
-            m_historyIndex = 0;
-            m_inHistoryRecall = false;
-            m_inputBuffer = m_scratchBuffer;
-        }
     }
     m_cursorPos = m_inputBuffer.size();
     refreshLine();
@@ -775,6 +863,38 @@ int Terminal::runExternalCommand(const CommandResolver::ResolutionResult& resolv
     return static_cast<int>(exitCode);
 }
 
+void Terminal::processLine(const std::string& line)
+{
+    try {
+        auto d = m_parser.dispatch(line);
+        switch (d.action) {
+            case CommandParser::CommandDispatch::Action::None:
+                break;
+            case CommandParser::CommandDispatch::Action::RunBuiltin:
+                m_parser.executeParsed(d.parsedStages);
+                break;
+            case CommandParser::CommandDispatch::Action::RunExternal:
+                runExternalCommand(d.external);
+                break;
+            case CommandParser::CommandDispatch::Action::NotFound:
+                std::cerr << d.message << '\n';
+                break;
+            case CommandParser::CommandDispatch::Action::Failed:
+                std::cerr << d.message << '\n';
+                break;
+        }
+        // Invalidate prompt cache after directory-changing commands
+        if (!d.parsedStages.empty() && !d.parsedStages[0].empty()) {
+            const auto& cmd = d.parsedStages[0][0];
+            if (cmd == "cd" || cmd == "push" || cmd == "pop") {
+                m_promptDirty = true;
+            }
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "error: " << e.what() << '\n';
+    }
+}
+
 void Terminal::run()
 {
 const char* ascii_art =
@@ -828,30 +948,7 @@ const char* ascii_art =
                 break;
             }
 
-            // Use dispatch to decide what to do: built-in, external, or not found.
-            try {
-                auto d = m_parser.dispatch(line);
-                switch (d.action) {
-                    case CommandParser::CommandDispatch::Action::None:
-                        break;
-                    case CommandParser::CommandDispatch::Action::RunBuiltin:
-                        // For built-in commands (including multi-stage pipelines), fall back
-                        // to the legacy execute() path.
-                        m_parser.execute(line);
-                        break;
-                    case CommandParser::CommandDispatch::Action::RunExternal:
-                        runExternalCommand(d.external);
-                        break;
-                    case CommandParser::CommandDispatch::Action::NotFound:
-                        std::cerr << d.message << '\n';
-                        break;
-                    case CommandParser::CommandDispatch::Action::Failed:
-                        std::cerr << d.message << '\n';
-                        break;
-                }
-            } catch (const std::exception& e) {
-                std::cerr << "error: " << e.what() << '\n';
-            }
+            processLine(line);
         }
         restoreRawInput();
     } else {
@@ -868,28 +965,7 @@ const char* ascii_art =
                 break;
             }
 
-            // Use dispatch to decide what to do: built-in, external, or not found.
-            try {
-                auto d = m_parser.dispatch(line);
-                switch (d.action) {
-                    case CommandParser::CommandDispatch::Action::None:
-                        break;
-                    case CommandParser::CommandDispatch::Action::RunBuiltin:
-                        m_parser.execute(line);
-                        break;
-                    case CommandParser::CommandDispatch::Action::RunExternal:
-                        runExternalCommand(d.external);
-                        break;
-                    case CommandParser::CommandDispatch::Action::NotFound:
-                        std::cerr << d.message << '\n';
-                        break;
-                    case CommandParser::CommandDispatch::Action::Failed:
-                        std::cerr << d.message << '\n';
-                        break;
-                }
-            } catch (const std::exception& e) {
-                std::cerr << "error: " << e.what() << '\n';
-            }
+            processLine(line);
         }
     }
 }

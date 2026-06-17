@@ -1,19 +1,39 @@
 #include "Commands.hpp"
+#include "Config.hpp"
 
-#define NOMINMAX
-#include <windows.h>
+#include <iostream>
+#include <fstream>
+#include <filesystem>
 #include <deque>
 #include <string>
 #include <vector>
-#include <iostream>
-#include <fstream>
 #include <sstream>
 #include <cctype>
-#include <filesystem>
+
+#define NOMINMAX
+#include <windows.h>
+#include <shellapi.h>
 
 namespace fs = std::filesystem;
 
 namespace {
+
+std::wstring utf8ToWide(const std::string& utf8) {
+    if (utf8.empty()) return {};
+    int size = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+                                   utf8.data(), static_cast<int>(utf8.size()),
+                                   nullptr, 0);
+    if (size == 0) return {};
+    std::wstring wide(size, L'\0');
+    MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+                        utf8.data(), static_cast<int>(utf8.size()),
+                        wide.data(), size);
+    return wide;
+}
+
+// ------------------------------------------------------------------
+// more command helpers
+// ------------------------------------------------------------------
 
 struct MoreOptions {
     bool help = false;
@@ -76,7 +96,7 @@ std::size_t getConsoleHeight() {
     return static_cast<std::size_t>(height);
 }
 
-MoreOptions parseMoreArgs(const commands::Args& args) {
+MoreOptions parseMoreArgs(const commands::Args& args, std::ostream& err) {
     MoreOptions opts;
     for (std::size_t i = 1; i < args.size(); ++i) {
         const std::string& token = args[i];
@@ -117,7 +137,7 @@ MoreOptions parseMoreArgs(const commands::Args& args) {
             }
         }
         if (!token.empty() && token[0] == '-') {
-            std::cerr << "more: invalid option: '" << token << "'\n";
+            err << "more: invalid option: '" << token << "'\n";
             continue;
         }
         opts.files.push_back(token);
@@ -314,7 +334,6 @@ void prePosition(PagerState& state, const MoreOptions& opts) {
             }
             state.lastWasBlank = blank;
             if (line.find(opts.startPattern) != std::string::npos) {
-                // Keep this line as the first to display
                 state.buffer.push_back(line);
                 break;
             }
@@ -328,7 +347,7 @@ void runPager(std::istream& in, std::ostream& out, const MoreOptions& opts) {
     state.showPromptHelp = opts.promptHelp;
     std::size_t consoleHeight = getConsoleHeight();
     state.pageHeight = (consoleHeight > 1) ? consoleHeight - 1 : 1;
-    state.maxBufferSize = state.pageHeight * 2;
+    state.maxBufferSize = state.pageHeight * config::PAGE_BUFFER_MULT;
 
     prePosition(state, opts);
 
@@ -348,10 +367,96 @@ void runPager(std::istream& in, std::ostream& out, const MoreOptions& opts) {
 
 } // anonymous namespace
 
-namespace commands {
+void commands::echo(const Args& args, std::ostream& out, std::istream& /*in*/, std::ostream& /*err*/)
+{
+    for (std::size_t i = 1; i < args.size(); ++i) {
+        if (i > 1) out << ' ';
+        out << args[i];
+    }
+    out << '\n';
+}
 
-void more(const Args& args, std::ostream& out, std::istream& in) {
-    MoreOptions opts = parseMoreArgs(args);
+void commands::clear(const Args& /*args*/, std::ostream& out, std::istream& /*in*/, std::ostream& /*err*/)
+{
+    // Clear screen, clear scrollback, and move cursor to home (cross-platform ANSI)
+    out << "\x1b[2J\x1b[3J\x1b[H" << std::flush;
+}
+
+void commands::open(const Args& args, std::ostream& out, std::istream& /*in*/, std::ostream& err)
+{
+    if (args.size() < 2) {
+        out << "usage: open [--url] <path|URL>\n"
+            << "  Opens a file or directory with the default system handler.\n"
+            << "  --url    allow opening URLs (http://, https://, ftp://)\n";
+        return;
+    }
+
+    // Parse --url flag
+    bool allowUrl = false;
+    std::string target_arg;
+    for (std::size_t i = 1; i < args.size(); ++i) {
+        if (args[i] == "--url") {
+            allowUrl = true;
+        } else if (target_arg.empty()) {
+            target_arg = args[i];
+        } else {
+            err << commands::RED << "open: too many arguments\n" << commands::RESET;
+            return;
+        }
+    }
+
+    if (target_arg.empty()) {
+        out << "usage: open [--url] <path|URL>\n"
+            << "  Opens a file or directory with the default system handler.\n"
+            << "  --url    allow opening URLs (http://, https://, ftp://)\n";
+        return;
+    }
+
+    // Reject URL schemes unless --url flag is provided
+    if (!allowUrl) {
+        if (target_arg.rfind("http://", 0) == 0 ||
+            target_arg.rfind("https://", 0) == 0 ||
+            target_arg.rfind("ftp://", 0) == 0) {
+            err << commands::RED << "open: refusing to open URL '" << target_arg
+                      << "' without --url flag\n" << commands::RESET;
+            return;
+        }
+    }
+
+    // If it's a URL with --url flag, open directly without filesystem check
+    if (allowUrl &&
+        (target_arg.rfind("http://", 0) == 0 ||
+         target_arg.rfind("https://", 0) == 0 ||
+         target_arg.rfind("ftp://", 0) == 0)) {
+        std::wstring wUrl = utf8ToWide(target_arg);
+        HINSTANCE result = ShellExecuteW(nullptr, L"open", wUrl.c_str(),
+                                         nullptr, nullptr, SW_SHOWNORMAL);
+        if (reinterpret_cast<intptr_t>(result) <= 32) {
+            err << commands::RED << "open: failed to open URL\n" << commands::RESET;
+        }
+        return;
+    }
+
+    // Validate that target exists on the local filesystem
+    fs::path target = fs::weakly_canonical(target_arg);
+
+    std::error_code ec;
+    bool exists = fs::exists(target, ec);
+    if (ec || !exists) {
+        err << commands::RED << "open: '" << target_arg << "' does not exist\n" << commands::RESET;
+        return;
+    }
+
+    std::wstring wPath = utf8ToWide(target.string());
+    HINSTANCE result = ShellExecuteW(nullptr, L"open", wPath.c_str(),
+                                     nullptr, nullptr, SW_SHOWNORMAL);
+    if (reinterpret_cast<intptr_t>(result) <= 32) {
+        err << commands::RED << "open: failed to open '" << target_arg << "'\n" << commands::RESET;
+    }
+}
+
+void commands::more(const Args& args, std::ostream& out, std::istream& in, std::ostream& err) {
+    MoreOptions opts = parseMoreArgs(args, err);
     if (opts.help) {
         printMoreHelp(out);
         return;
@@ -363,7 +468,7 @@ void more(const Args& args, std::ostream& out, std::istream& in) {
             for (const std::string& path : opts.files) {
                 std::ifstream file(path);
                 if (!file.is_open()) {
-                    std::cerr << "more: " << path << ": No such file or directory\n";
+                    err << "more: " << path << ": No such file or directory\n";
                     continue;
                 }
                 streamThrough(file, out);
@@ -378,7 +483,7 @@ void more(const Args& args, std::ostream& out, std::istream& in) {
         for (const std::string& path : opts.files) {
             std::ifstream file(path);
             if (!file.is_open()) {
-                std::cerr << "more: " << path << ": No such file or directory\n";
+                err << "more: " << path << ": No such file or directory\n";
                 continue;
             }
             // Reset options per file so each starts fresh
@@ -390,5 +495,3 @@ void more(const Args& args, std::ostream& out, std::istream& in) {
         runPager(in, out, opts);
     }
 }
-
-} // namespace commands

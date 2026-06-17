@@ -3,6 +3,8 @@
 #include <windows.h>
 #include <algorithm>
 #include <cassert>
+#include <iostream>
+#include <string_view>
 
 // ---------------------------------------------------------------------------
 // Internal helper: read a semicolon-delimited environment variable via the
@@ -133,36 +135,128 @@ std::vector<std::wstring> CommandResolver::getPathext()
 }
 
 // ---------------------------------------------------------------------------
-// Private: build a properly quoted wide command line.
+// Internal helper: check if an executable path ends with .cmd or .bat
+// (case-insensitive).
+// ---------------------------------------------------------------------------
+static bool isBatchFile(const std::wstring& exePath)
+{
+    if (exePath.size() < 4) return false;
+    std::wstring ext = exePath.substr(exePath.size() - 4);
+    // Lowercase the extension for comparison
+    for (auto& ch : ext) {
+        if (ch >= L'A' && ch <= L'Z') ch += 32;
+    }
+    return ext == L".cmd" || ext == L".bat";
+}
+
+// ---------------------------------------------------------------------------
+// Internal helper: escape a single argument using the Windows CreateProcess
+// escaping algorithm.
+//
+// Rules (https://learn.microsoft.com/en-us/cpp/c-runtime-library/
+//        parsing-c-command-line-arguments):
+//  - If the argument is empty or contains spaces, tabs, or double-quotes,
+//    it must be wrapped in double-quotes.
+//  - Inside quotes, backslashes are literal UNLESS they precede a `"`:
+//    - N backslashes followed by `"`: emit 2N+1 backslashes then the `"`.
+//    - N trailing backslashes (precede closing quote): emit 2N backslashes.
+//  - For .cmd/.bat targets, additionally escape cmd.exe metacharacters
+//    (&|^<>()) with a `^` prefix.
+// ---------------------------------------------------------------------------
+static std::wstring escapeArgument(const std::wstring& arg, bool isBatch)
+{
+    using namespace std::literals;
+
+    std::wstring result;
+    bool needQuotes = arg.empty() || arg.find_first_of(L" \t\"") != std::wstring::npos;
+
+    if (needQuotes) result += L'"';
+
+    for (size_t i = 0; i < arg.size(); ++i) {
+        size_t backslashes = 0;
+        while (i < arg.size() && arg[i] == L'\\') {
+            ++backslashes;
+            ++i;
+        }
+
+        if (i == arg.size()) {
+            // Trailing backslashes: double them only if they precede the closing quote
+            result.append(needQuotes ? backslashes * 2 : backslashes, L'\\');
+        } else if (arg[i] == L'"') {
+            // Backslashes before quote: double + escape the quote
+            result.append(backslashes * 2 + 1, L'\\');
+            result += L'"';
+        } else {
+            result.append(backslashes, L'\\');
+            result += arg[i];
+        }
+    }
+
+    if (needQuotes) result += L'"';
+
+    if (isBatch) {
+        // Escape cmd.exe metacharacters with ^
+        std::wstring escaped;
+        escaped.reserve(result.size() + 8);
+        for (wchar_t c : result) {
+            if (L"&|^<>()"sv.find(c) != std::wstring_view::npos) {
+                escaped += L'^';
+            }
+            escaped += c;
+        }
+        return escaped;
+    }
+
+    return result;
+}
+
+// ---------------------------------------------------------------------------
+// Private: build a properly escaped wide command line using Windows
+// CreateProcess escaping rules.
 // ---------------------------------------------------------------------------
 std::wstring CommandResolver::buildCommandLine(const std::wstring& exePath,
                                                const std::vector<std::string>& args)
 {
+    const bool isBatch = isBatchFile(exePath);
+
     std::wstring cmdLine;
     cmdLine.reserve(exePath.size() + args.size() * 16);
 
+    // argv[0] is the executable path — always quote it, but no special
+    // escaping needed (paths don't embed double-quotes on Windows).
     cmdLine += L'"';
     cmdLine += exePath;
     cmdLine += L'"';
 
+    // Escape each subsequent argument properly.
     for (std::size_t i = 1; i < args.size(); ++i) {
         cmdLine += L' ';
-        const std::wstring warg = widen(args[i]);
-
-        bool needQuotes = warg.empty() ||
-                          warg.find(L' ')  != std::wstring::npos ||
-                          warg.find(L'\t') != std::wstring::npos;
-
-        if (needQuotes) {
-            cmdLine += L'"';
-            cmdLine += warg;
-            cmdLine += L'"';
-        } else {
-            cmdLine += warg;
-        }
+        cmdLine += escapeArgument(widen(args[i]), isBatch);
     }
 
     return cmdLine;
+}
+
+// ---------------------------------------------------------------------------
+// Internal helper: check if CWD execution is allowed via the
+// TERMINAL_ALLOW_CWD_EXEC environment variable.
+// Returns true (allow) by default for backward compatibility.
+// Returns false only when the env var is explicitly "0" or "false".
+// ---------------------------------------------------------------------------
+static bool isCwdExecutionAllowed()
+{
+    wchar_t buf[64]{};
+    DWORD n = ::GetEnvironmentVariableW(L"TERMINAL_ALLOW_CWD_EXEC", buf, 64);
+    if (n == 0 || n >= 64) {
+        return true; // not set or too long — default to allowed
+    }
+
+    std::wstring val(buf, n);
+    // Lowercase for comparison
+    for (auto& ch : val) {
+        if (ch >= L'A' && ch <= L'Z') ch += 32;
+    }
+    return val != L"0" && val != L"false";
 }
 
 // ---------------------------------------------------------------------------
@@ -194,7 +288,10 @@ CommandResolver::resolve(const std::string& name, const std::vector<std::string>
     // process environment has a stripped PATHEXT (e.g. when the
     // terminal is launched from an IDE).
     //
-    // Search order: current directory first, then each PATH directory.
+    // Search order: system PATH directories first, CWD last.
+    // This prevents CWD shadowing attacks where a malicious binary in the
+    // current directory overrides a legitimate system command.
+    //
     // Within each directory:
     //   a) Try the name + each PATHEXT extension (e.g. npm.CMD, npm.EXE)
     //      so that npm.cmd is preferred over a bare Unix-style shim.
@@ -249,9 +346,29 @@ CommandResolver::resolve(const std::string& name, const std::vector<std::string>
         return std::nullopt;
     };
 
-    if (auto r = tryDir(curDir)) return r;
+    // 1) Search system PATH directories first.
     for (const auto& dir : getPathDirs()) {
         if (auto r = tryDir(dir)) return r;
+    }
+
+    // 2) Search CWD last — with security checks for unqualified commands.
+    if (auto r = tryDir(curDir)) {
+        // The binary was found in CWD but NOT on PATH. Emit a warning.
+        std::cerr << "warning: '" << name
+                  << "' resolved from current directory ("
+                  << r->executable.string()
+                  << "). Use './" << name
+                  << "' to suppress this warning.\n";
+
+        // Check if CWD execution is allowed by the environment variable.
+        if (!isCwdExecutionAllowed()) {
+            std::cerr << "error: execution of unqualified CWD binary refused "
+                         "(TERMINAL_ALLOW_CWD_EXEC=0). Use './" << name
+                      << "' to explicitly run from CWD.\n";
+            return std::nullopt;
+        }
+
+        return r;
     }
 
     return std::nullopt;
