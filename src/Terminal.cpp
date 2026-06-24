@@ -302,6 +302,12 @@ std::string Terminal::getPromptString() const
 
 void Terminal::printPrompt() const
 {
+    // Move to column 0 of the current line and clear from cursor to end
+    // of line. This ensures the prompt always starts at column 0
+    // regardless of where the cursor was left by a previous command
+    // (e.g. a TUI child that exited without resetting the cursor).
+    writeUtf8ToConsole(m_hConsole, "\r\x1b[K");
+
     const std::string prompt = getPromptString();
 
     if (m_vtEnabled) {
@@ -386,7 +392,10 @@ std::string Terminal::readLineRaw()
         if (vk == VK_RETURN) {
             m_inHistoryRecall = false;
             m_historyIndex = 0;
-            writeUtf8ToConsole(m_hConsole, "\n");
+            // In VT mode, \n alone is a Line Feed (moves down without
+            // resetting the column). We need \r\n to move to column 0 of
+            // the next line, so the next prompt starts at column 0.
+            writeUtf8ToConsole(m_hConsole, "\r\n");
             return m_inputBuffer;
         }
 
@@ -860,6 +869,14 @@ int Terminal::runExternalCommand(const CommandResolver::ResolutionResult& resolv
     GetExitCodeProcess(m_fgJob.hProcess, &exitCode);
     m_fgJob.reset();
     setupRawInput();
+
+    // Ensure the cursor is at column 0 of a fresh line for the next prompt.
+    // A TUI child may have left the cursor at any position; the shell
+    // always wants a clean column-0 start. \r\n moves the cursor to
+    // (col=0, row+1); in VT mode, \n alone would just move down without
+    // resetting the column.
+    writeUtf8ToConsole(m_hConsole, "\r\n");
+
     return static_cast<int>(exitCode);
 }
 
