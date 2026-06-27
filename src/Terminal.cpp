@@ -580,7 +580,13 @@ void Terminal::handleTab()
 
     std::vector<std::string> candidates;
     if (isFirstToken) {
-        candidates = getCommandCandidates(token);
+        // A first token that contains a path separator (e.g. "./cma", "../foo")
+        // is an explicit path, not a command name. Route it to path completion.
+        if (token.find_first_of("/\\") != std::string::npos) {
+            candidates = getPathCandidates(token);
+        } else {
+            candidates = getCommandCandidates(token);
+        }
     } else {
         candidates = getPathCandidates(token);
     }
@@ -632,29 +638,60 @@ std::vector<std::string> Terminal::getCommandCandidates(const std::string& prefi
 std::vector<std::string> Terminal::getPathCandidates(const std::string& token) const
 {
     namespace fs = std::filesystem;
-    fs::path p(token);
-    fs::path dir = p.parent_path();
-    std::string prefix = p.filename().string();
-    if (dir.empty()) {
-        dir = ".";
+
+    // Split the token into the directory part and the filename prefix.
+    // We do this manually (not via fs::path) to avoid platform-specific
+    // quirks with std::filesystem::path on Windows (forward vs back
+    // slash, "./" prefix handling, etc.).
+    std::string dirPart;
+    std::string prefix;
+
+    // Find the last separator ('/' or '\\') in the token.
+    size_t sepPos = token.find_last_of("/\\");
+    if (sepPos == std::string::npos) {
+        // No separator: token is just a filename prefix in the CWD.
+        dirPart = ".";
+        prefix = token;
+    } else {
+        // Token has a path component. Split at the last separator.
+        dirPart = token.substr(0, sepPos);
+        prefix = token.substr(sepPos + 1);
+        // Special case: if dirPart is empty (token starts with /), use "/".
+        if (dirPart.empty()) {
+            dirPart = token.substr(0, 1);  // just the leading separator
+        }
+        // Special case: if dirPart is "." or "./", keep it as ".".
+        if (dirPart == "." || dirPart == "./" || dirPart == ".\\") {
+            dirPart = ".";
+        }
     }
 
     std::vector<std::string> candidates;
     try {
-        for (const auto& entry : fs::directory_iterator(dir)) {
+        for (const auto& entry : fs::directory_iterator(dirPart)) {
             std::string fname = entry.path().filename().string();
-            if (fname.size() >= prefix.size() && fname.compare(0, prefix.size(), prefix) == 0) {
+            if (fname.size() >= prefix.size() &&
+                fname.compare(0, prefix.size(), prefix) == 0) {
                 if (entry.is_directory()) {
-                    fname.push_back(static_cast<char>(fs::path::preferred_separator));
+                    fname.push_back('/');  // always use forward slash for shell input
                 }
-                if (!p.parent_path().empty()) {
-                    fname = (p.parent_path() / fname).string();
+                // Reconstruct the full path: original prefix (dirPart) + "/" + fname
+                std::string fullPath;
+                // Strip trailing separator from dirPart if any
+                std::string dirClean = dirPart;
+                if (!dirClean.empty() && (dirClean.back() == '/' || dirClean.back() == '\\')) {
+                    dirClean.pop_back();
                 }
-                candidates.push_back(fname);
+                if (dirClean.empty() || dirClean == ".") {
+                    fullPath = fname;
+                } else {
+                    fullPath = dirClean + "/" + fname;  // use forward slash
+                }
+                candidates.push_back(fullPath);
             }
         }
     } catch (const fs::filesystem_error&) {
-        // return empty list
+        // directory doesn't exist or can't be read — return empty list
     }
     return candidates;
 }
@@ -677,11 +714,16 @@ std::string Terminal::longestCommonPrefix(const std::vector<std::string>& items)
 
 void Terminal::displayCandidates(const std::vector<std::string>& candidates)
 {
-    writeUtf8ToConsole(m_hConsole, "\n");
+    // In VT mode, "\n" alone is just LF (moves down without resetting the
+    // column). We need "\r\n" so each line — including the candidate list
+    // and the prompt re-positioning — starts at column 0. This matches the
+    // cursor-management fix applied to printPrompt(), readLineRaw()'s
+    // Enter handler, and runExternalCommand().
+    writeUtf8ToConsole(m_hConsole, "\r\n");
     for (const auto& c : candidates) {
-        writeUtf8ToConsole(m_hConsole, c + "\n");
+        writeUtf8ToConsole(m_hConsole, c + "\r\n");
     }
-    writeUtf8ToConsole(m_hConsole, "\n");
+    writeUtf8ToConsole(m_hConsole, "\r\n");
     printPrompt();
     writeUtf8ToConsole(m_hConsole, m_inputBuffer);
     std::cout.flush();
