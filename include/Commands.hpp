@@ -35,6 +35,7 @@ namespace commands {
     void slots(const Args& args, std::ostream& out, std::istream& in, std::ostream& err);
     void more(const Args& args, std::ostream& out, std::istream& in, std::ostream& err);
     void mkdir(const Args& args, std::ostream& out, std::istream& in, std::ostream& err);
+    void bc  (const Args& args, std::ostream& out, std::istream& in, std::ostream& err);
 
 } // namespace commands
 

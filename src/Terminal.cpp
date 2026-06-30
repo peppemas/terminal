@@ -1,6 +1,8 @@
 #include "Terminal.hpp"
 #include "Commands.hpp"
 
+#include <ftxui/component/screen_interactive.hpp>
+
 #include <iostream>
 #include <filesystem>
 #include <fstream>
@@ -242,6 +244,7 @@ Terminal::Terminal()
     m_parser.registerCommand("slots", commands::slots);
     m_parser.registerCommand("more",  commands::more);
     m_parser.registerCommand("mkdir", commands::mkdir);
+    m_parser.registerCommand("bc",    commands::bc);
 
     loadHistory();
 }
@@ -470,26 +473,7 @@ std::string Terminal::readLineRaw()
             continue;
         }
 
-        // With SetConsoleCP(CP_UTF8), the Windows console host encodes each
-        // non-ASCII keystroke as a UTF-8 byte sequence and delivers each
-        // byte as a separate KEY_EVENT whose uChar.UnicodeChar is set to
-        // the byte value (in 0x00-0xFF range, NOT a true Unicode code point).
-        // We reassemble these into the proper UTF-8 string.
-        //
-        // For a 2-byte UTF-8 sequence (e.g. ò = 0xC3 0xB2): first event has
-        // wc in 0xC2-0xDF, second has wc in 0x80-0xBF. The two events are
-        // delivered back-to-back.
-        //
-        // For 3-byte UTF-8 (e.g. € = 0xE2 0x82 0xAC): first event wc in
-        // 0xE0-0xEF, then two continuation events wc in 0x80-0xBF.
-        //
-        // For 4-byte UTF-8 (e.g. 𝛑 = 0xF0 0x9D 0x9B 0x91): wc in 0xF0-0xF4
-        // followed by three continuation events.
-        //
-        // ASCII (wc < 0x80) is a single self-contained event.
-
         if (wc < 0x80) {
-            // ASCII: just insert directly.
             std::string utf8(1, static_cast<char>(wc));
             m_inputBuffer.insert(m_cursorPos, utf8);
             m_cursorPos += utf8.length();
@@ -498,53 +482,31 @@ std::string Terminal::readLineRaw()
             continue;
         }
 
-        // For multi-byte UTF-8, the console delivers each byte as a separate
-        // WCHAR. We need to figure out the sequence length from the first byte
-        // and consume the right number of subsequent events.
-        // (In practice, conhost delivers all the bytes of a single keystroke
-        // back-to-back, so we can just consume them from the input queue
-        // synchronously here. This is the only safe approach because the
-        // input is delivered in a tight burst.)
-        if (wc < 0xC0) {
-            // Stray continuation byte — skip it.
-            continue;
-        }
-
         size_t seqLen = 0;
         if      (wc < 0xE0) seqLen = 2;
         else if (wc < 0xF0) seqLen = 3;
         else if (wc < 0xF8) seqLen = 4;
         else {
-            // Invalid lead byte — skip it.
             continue;
         }
 
-        // Build the UTF-8 sequence. We use PeekConsoleInput + ReadConsoleInput
-        // to pull the remaining bytes of this sequence from the queue WITHOUT
-        // blocking (PeekConsoleInput returns immediately).
         std::string utf8;
         utf8.push_back(static_cast<char>(wc));
 
         size_t bytesNeeded = seqLen - 1;
         while (bytesNeeded > 0) {
-            // Peek at the next event(s) to see if more UTF-8 continuation
-            // bytes are waiting in the queue.
             INPUT_RECORD peekRec;
             DWORD peekCount = 0;
             if (!PeekConsoleInput(m_hInput, &peekRec, 1, &peekCount) || peekCount == 0) {
                 break;
             }
             if (peekRec.EventType != KEY_EVENT || !peekRec.Event.KeyEvent.bKeyDown) {
-                // Not a continuation byte — stop reading and let the main loop
-                // handle this event on the next iteration.
                 break;
             }
             WCHAR peekWc = peekRec.Event.KeyEvent.uChar.UnicodeChar;
             if (peekWc < 0x80 || peekWc > 0xBF) {
-                // Not a continuation byte — leave it for the main loop.
                 break;
             }
-            // It IS a continuation byte; consume it.
             DWORD consumeCount = 0;
             if (!ReadConsoleInput(m_hInput, &peekRec, 1, &consumeCount)) {
                 break;
@@ -559,9 +521,6 @@ std::string Terminal::readLineRaw()
             m_lastWasTab = false;
             refreshLine();
         }
-        // If we couldn't get a full UTF-8 sequence (e.g. the events arrived
-        // out of order, or PeekConsoleInput is failing for some reason), just
-        // drop the partial input rather than inserting garbage.
     }
 }
 
@@ -739,11 +698,10 @@ void Terminal::addToHistory(const std::string& line)
 
 void Terminal::loadHistory()
 {
-    // Use _dupenv_s instead of getenv for MSVC safety (C4996)
     char* userProfile = nullptr;
     size_t len = 0;
     if (_dupenv_s(&userProfile, &len, "USERPROFILE") != 0 || !userProfile) {
-        return; // No USERPROFILE set, start with empty history
+        return;
     }
 
     std::filesystem::path historyPath =
@@ -752,7 +710,6 @@ void Terminal::loadHistory()
 
     std::ifstream file(historyPath, std::ios::in);
     if (!file.is_open()) {
-        // File doesn't exist or can't be opened — start with empty history
         return;
     }
 
@@ -764,20 +721,17 @@ void Terminal::loadHistory()
             }
         }
     } catch (const std::exception& e) {
-        // Corrupted/unreadable file — warn and start with empty history
         std::cerr << "warning: could not read history file: " << e.what() << '\n';
         m_history.clear();
         return;
     }
 
     if (file.bad()) {
-        // I/O error during read — warn and start with empty history
         std::cerr << "warning: error reading history file, starting with empty history\n";
         m_history.clear();
         return;
     }
 
-    // Trim to last config::MAX_HISTORY_SIZE entries
     if (m_history.size() > config::MAX_HISTORY_SIZE) {
         m_history.erase(m_history.begin(),
                         m_history.begin() + static_cast<std::ptrdiff_t>(
@@ -787,11 +741,10 @@ void Terminal::loadHistory()
 
 void Terminal::saveHistory()
 {
-    // Use _dupenv_s instead of getenv for MSVC safety (C4996)
     char* userProfile = nullptr;
     size_t len = 0;
     if (_dupenv_s(&userProfile, &len, "USERPROFILE") != 0 || !userProfile) {
-        return; // No USERPROFILE set, cannot save
+        return;
     }
 
     std::filesystem::path historyPath =
@@ -805,7 +758,6 @@ void Terminal::saveHistory()
         return;
     }
 
-    // Write the last config::MAX_HISTORY_SIZE entries
     size_t startIdx = 0;
     if (m_history.size() > config::MAX_HISTORY_SIZE) {
         startIdx = m_history.size() - config::MAX_HISTORY_SIZE;
@@ -827,7 +779,7 @@ void Terminal::saveHistory()
 
 void Terminal::recallHistory(int direction)
 {
-    if (m_history.empty()) return; // Guard: empty history
+    if (m_history.empty()) return;
 
     if (!m_inHistoryRecall) {
         m_inHistoryRecall = true;
@@ -835,9 +787,9 @@ void Terminal::recallHistory(int direction)
         m_historyIndex = 0;
     }
 
-    if (direction > 0) { // older
+    if (direction > 0) {
         if (m_historyIndex < m_history.size()) ++m_historyIndex;
-    } else { // newer
+    } else {
         if (m_historyIndex > 0) --m_historyIndex;
     }
 
@@ -878,26 +830,16 @@ int Terminal::runExternalCommand(const CommandResolver::ResolutionResult& resolv
         return -1;
     }
 
-    // Hand the console back to cooked mode while the child runs. With
-    // ENABLE_PROCESSED_INPUT restored, the console itself turns Ctrl+C into
-    // a CTRL_C_EVENT delivered to every process attached to it — the child
-    // gets it directly (like in cmd/PowerShell), and the shell's own ctrl
-    // handler swallows it and records the request so we can escalate if the
-    // child refuses to die. This also gives interactive children normal
-    // line-buffered, echoed stdin.
     g_interruptRequested = false;
     restoreRawInput();
 
     while (m_fgJob.isActive()) {
         DWORD wait = WaitForSingleObject(m_fgJob.hProcess, 100);
         if (wait != WAIT_TIMEOUT) {
-            break;  // child exited (or wait error)
+            break;
         }
 
         if (g_interruptRequested) {
-            // The child received the same Ctrl+C from the console. Give it a
-            // moment to exit politely, then escalate to CTRL_BREAK, then to
-            // TerminateProcess.
             if (m_fgJob.wait(1000)) { break; }
             m_fgJob.interruptBreak();
             if (m_fgJob.wait(1000)) { break; }
@@ -922,9 +864,54 @@ int Terminal::runExternalCommand(const CommandResolver::ResolutionResult& resolv
     return static_cast<int>(exitCode);
 }
 
+static bool isTuiCommand(const std::string& cmd)
+{
+    return cmd == "bc";
+}
+
+bool Terminal::runTuiCommandIfAny(const std::string& line)
+{
+    std::istringstream iss(line);
+    std::string cmd;
+    if (!(iss >> cmd) || !isTuiCommand(cmd)) {
+        return false;
+    }
+
+    commands::Args args{cmd};
+    std::string token;
+    while (iss >> token) {
+        args.push_back(token);
+    }
+
+    commands::bc(args, std::cout, std::cin, std::cerr);
+
+    // TUI session ended. Reset state and leave the cursor at column 1 on a
+    // fresh, cleared line. The main loop's printPrompt() will redraw the
+    // prompt at the start of the next iteration; we must NOT call
+    // refreshLine() here, or the prompt will be printed twice and the
+    // second one will be misaligned.
+    m_inputBuffer.clear();
+    m_cursorPos = 0;
+    m_lastWasTab = false;
+    m_inHistoryRecall = false;
+    m_historyIndex = 0;
+
+    // CR (\r) -> column 1, EL (\x1b[K) -> erase to end of line. This
+    // guarantees the prompt is drawn on a clean line regardless of where
+    // FTXUI left the cursor on the primary screen buffer.
+    writeUtf8ToConsole(m_hConsole, "\r\x1b[K");
+    std::cout.flush();
+
+    return true;
+}
+
 void Terminal::processLine(const std::string& line)
 {
     try {
+        if (runTuiCommandIfAny(line)) {
+            return;
+        }
+
         auto d = m_parser.dispatch(line);
         switch (d.action) {
             case CommandParser::CommandDispatch::Action::None:
@@ -942,7 +929,6 @@ void Terminal::processLine(const std::string& line)
                 std::cerr << d.message << '\n';
                 break;
         }
-        // Invalidate prompt cache after directory-changing commands
         if (!d.parsedStages.empty() && !d.parsedStages[0].empty()) {
             const auto& cmd = d.parsedStages[0][0];
             if (cmd == "cd" || cmd == "push" || cmd == "pop") {
@@ -957,30 +943,30 @@ void Terminal::processLine(const std::string& line)
 void Terminal::run()
 {
 const char* ascii_art =
-    "                                                            [0m\n"
-    "                             [38;5;188m0[38;5;188m0[38;5;188m0[38;5;188m0                           [0m\n"
-    "          [38;5;231m0[38;5;231m0[38;5;231m0[38;5;231m0[38;5;231m0[38;5;231m0[38;5;188m0     [38;5;231m0[38;5;231m0[38;5;231m0[38;5;231m0[38;5;231m0[38;5;231m0[38;5;188m0[38;5;188m0[38;5;146m0[38;5;146m0[38;5;188m0[38;5;188m0[38;5;231m0[38;5;231m0[38;5;231m0[38;5;231m0[38;5;231m0[38;5;188m0 [38;5;188m0[38;5;231m0[38;5;231m0[38;5;231m0[38;5;231m0[38;5;230m0[38;5;188m0            [0m\n"
-    "         [38;5;231m0[38;5;188m0[38;5;103m1[38;5;188m0[38;5;188m0[38;5;145m0[38;5;145m0[38;5;188m0[38;5;231m0[38;5;231m0[38;5;231m0[38;5;231m0[38;5;231m0[38;5;231m0[38;5;145m0[38;5;102m1[38;5;101m1[38;5;144m0[38;5;186m0[38;5;222m0[38;5;222m0[38;5;222m0[38;5;222m0[38;5;222m0[38;5;223m0[38;5;187m0[38;5;144m0[38;5;102m1[38;5;102m1[38;5;146m0[38;5;188m0[38;5;188m0[38;5;188m0[38;5;146m0[38;5;145m0[38;5;145m0[38;5;146m0[38;5;188m0[38;5;188m0[38;5;231m0[38;5;231m0[38;5;231m0[38;5;231m0[38;5;188m0       [0m\n"
-    "        [38;5;231m0[38;5;231m0[38;5;102m1[38;5;172m1[38;5;102m1[38;5;188m0[38;5;102m1[38;5;95m1[38;5;172m1[38;5;179m0[38;5;102m1[38;5;231m0[38;5;188m0[38;5;59m1[38;5;24m1[38;5;24m1[38;5;24m1[38;5;24m1[38;5;60m1[38;5;102m1[38;5;180m0[38;5;222m0[38;5;222m0[38;5;222m0[38;5;222m0[38;5;222m0[38;5;185m0[38;5;101m1[38;5;23m1[38;5;66m1[38;5;73m1[38;5;110m0[38;5;110m0[38;5;66m1[38;5;180m0[38;5;222m0[38;5;222m0[38;5;222m0[38;5;222m0[38;5;221m0[38;5;215m0[38;5;137m1[38;5;102m1[38;5;231m0[38;5;231m0[38;5;231m0      [0m\n"
-    "        [38;5;231m0[38;5;231m0[38;5;145m0[38;5;130m1[38;5;172m1[38;5;173m1[38;5;102m1[38;5;145m0[38;5;102m1[38;5;95m1[38;5;143m0[38;5;143m0[38;5;59m1[38;5;24m1[38;5;24m1[38;5;109m0[38;5;188m0[38;5;109m1[38;5;24m1[38;5;24m1[38;5;66m1[38;5;24m1[38;5;66m1[38;5;101m1[38;5;59m1[38;5;67m1[38;5;110m0[38;5;116m0[38;5;110m0[38;5;74m0[38;5;74m0[38;5;74m0[38;5;74m1[38;5;74m1[38;5;67m1[38;5;59m1[38;5;178m0[38;5;214m0[38;5;214m0[38;5;214m0[38;5;214m0[38;5;214m0[38;5;172m1[38;5;102m1[38;5;231m0[38;5;231m0      [0m\n"
-    "         [38;5;231m0[38;5;231m0[38;5;102m1[38;5;94m1[38;5;166m1[38;5;166m1[38;5;172m1[38;5;172m1[38;5;172m0[38;5;172m0[38;5;173m0[38;5;173m1[38;5;95m1[38;5;24m1[38;5;24m1[38;5;24m1[38;5;24m1[38;5;24m1[38;5;59m1[38;5;95m1[38;5;59m1[38;5;59m1[38;5;110m0[38;5;110m0[38;5;74m0[38;5;74m1[38;5;67m1[38;5;66m1[38;5;66m1[38;5;66m1[38;5;66m1[38;5;67m1[38;5;67m1[38;5;74m1[38;5;74m1[38;5;65m1[38;5;178m0[38;5;214m0[38;5;214m0[38;5;214m0[38;5;214m0[38;5;131m1[38;5;145m0[38;5;231m0[38;5;188m0      [0m\n"
-    "          [38;5;231m0[38;5;231m0[38;5;188m0[38;5;102m1[38;5;131m1[38;5;130m1[38;5;130m1[38;5;166m1[38;5;166m1[38;5;166m1[38;5;95m1[38;5;95m1[38;5;101m1[38;5;101m1[38;5;173m0[38;5;172m1[38;5;94m1[38;5;94m1[38;5;173m1[38;5;95m1[38;5;137m1[38;5;67m1[38;5;74m1[38;5;74m1[38;5;24m1[38;5;66m1[38;5;107m0[38;5;150m0[38;5;150m0[38;5;150m0[38;5;65m1[38;5;24m1[38;5;67m1[38;5;74m1[38;5;67m1[38;5;59m1[38;5;214m0[38;5;214m0[38;5;208m0[38;5;172m1[38;5;102m1[38;5;231m0[38;5;231m0[38;5;188m0      [0m\n"
-    "            [38;5;230m0[38;5;231m0[38;5;231m0[38;5;145m0[38;5;24m1[38;5;24m1[38;5;23m1[38;5;101m1[38;5;137m1[38;5;59m1[38;5;59m1[38;5;59m1[38;5;59m1[38;5;17m1[38;5;24m1[38;5;59m1[38;5;100m1[38;5;59m1[38;5;67m1[38;5;74m1[38;5;74m1[38;5;67m1[38;5;24m1[38;5;65m1[38;5;107m0[38;5;107m0[38;5;107m0[38;5;113m0[38;5;107m0[38;5;24m1[38;5;67m1[38;5;74m1[38;5;74m1[38;5;67m1[38;5;95m1[38;5;208m0[38;5;172m1[38;5;66m1[38;5;231m0[38;5;231m0[38;5;188m0       [0m\n"
-    "             [38;5;231m0[38;5;231m0[38;5;66m1[38;5;24m1[38;5;59m1[38;5;101m1[38;5;95m1[38;5;59m1[38;5;59m1[38;5;137m1[38;5;172m1[38;5;59m1[38;5;31m1[38;5;24m1[38;5;66m1[38;5;102m1[38;5;66m1[38;5;67m1[38;5;74m0[38;5;74m0[38;5;74m0[38;5;31m1[38;5;24m1[38;5;30m1[38;5;65m1[38;5;65m1[38;5;59m1[38;5;30m1[38;5;24m1[38;5;74m1[38;5;74m1[38;5;67m1[38;5;31m1[38;5;60m1[38;5;59m1[38;5;145m0[38;5;231m0[38;5;231m0         [0m\n"
-    "            [38;5;231m0[38;5;231m0[38;5;231m0[38;5;60m1[38;5;24m1[38;5;67m1[38;5;67m1[38;5;24m1[38;5;24m1[38;5;24m1[38;5;24m1[38;5;59m1[38;5;144m0[38;5;221m0[38;5;214m0[38;5;214m0[38;5;214m0[38;5;137m1[38;5;67m1[38;5;74m0[38;5;74m0[38;5;74m0[38;5;74m0[38;5;74m1[38;5;67m1[38;5;30m1[38;5;24m1[38;5;31m1[38;5;67m1[38;5;74m1[38;5;67m1[38;5;67m1[38;5;67m1[38;5;30m1[38;5;59m1[38;5;95m1[38;5;145m0[38;5;188m0[38;5;188m0[38;5;231m0[38;5;231m0[38;5;231m0[38;5;231m0[38;5;188m0    [0m\n"
-    "            [38;5;188m0[38;5;231m0[38;5;231m0[38;5;60m1[38;5;24m1[38;5;60m1[38;5;60m1[38;5;59m1[38;5;95m1[38;5;59m1[38;5;143m0[38;5;214m0[38;5;214m0[38;5;208m0[38;5;208m0[38;5;172m1[38;5;59m1[38;5;31m1[38;5;74m1[38;5;74m0[38;5;74m0[38;5;74m1[38;5;67m1[38;5;59m1[38;5;59m1[38;5;66m1[38;5;67m1[38;5;31m1[38;5;31m1[38;5;31m1[38;5;31m1[38;5;24m1[38;5;101m1[38;5;179m0[38;5;101m1[38;5;179m0[38;5;166m1[38;5;95m1[38;5;145m0[38;5;188m0[38;5;95m1[38;5;138m0[38;5;231m0[38;5;231m0    [0m\n"
-    "            [38;5;231m0[38;5;231m0[38;5;181m0[38;5;173m1[38;5;179m0[38;5;209m0[38;5;215m0[38;5;221m0[38;5;221m0[38;5;179m0[38;5;95m1[38;5;59m1[38;5;59m1[38;5;60m1[38;5;24m1[38;5;31m1[38;5;74m1[38;5;74m1[38;5;74m0[38;5;74m0[38;5;74m1[38;5;66m1[38;5;101m1[38;5;131m1[38;5;137m1[38;5;95m1[38;5;59m1[38;5;31m1[38;5;24m1[38;5;60m1[38;5;180m0[38;5;143m0[38;5;101m1[38;5;101m1[38;5;95m1[38;5;95m1[38;5;23m1[38;5;145m0[38;5;137m1[38;5;173m0[38;5;130m1[38;5;138m1[38;5;231m0[38;5;231m0    [0m\n"
-    "          [38;5;230m0[38;5;231m0[38;5;231m0[38;5;181m0[38;5;174m0[38;5;173m1[38;5;215m0[38;5;215m0[38;5;221m0[38;5;222m0[38;5;215m0[38;5;208m0[38;5;208m0[38;5;136m1[38;5;66m1[38;5;73m1[38;5;30m1[38;5;24m1[38;5;31m1[38;5;31m1[38;5;31m1[38;5;31m1[38;5;31m1[38;5;24m1[38;5;59m1[38;5;59m1[38;5;52m1[38;5;94m1[38;5;137m1[38;5;102m1[38;5;152m0[38;5;187m0[38;5;101m1[38;5;173m0[38;5;173m0[38;5;173m0[38;5;173m0[38;5;173m1[38;5;172m1[38;5;173m1[38;5;166m1[38;5;130m1[38;5;95m1[38;5;188m0[38;5;231m0[38;5;188m0    [0m\n"
-    "         [38;5;231m0[38;5;231m0[38;5;231m0[38;5;174m1[38;5;173m0[38;5;172m1[38;5;172m0[38;5;215m0[38;5;221m0[38;5;222m0[38;5;215m0[38;5;215m0[38;5;215m0[38;5;215m0[38;5;215m0[38;5;215m0[38;5;95m1[38;5;23m1[38;5;24m1[38;5;23m1[38;5;59m1[38;5;137m1[38;5;136m1[38;5;172m1[38;5;214m0[38;5;220m0[38;5;138m1[38;5;103m1[38;5;95m1[38;5;130m1[38;5;95m1[38;5;101m1[38;5;101m1[38;5;143m0[38;5;95m1[38;5;166m1[38;5;166m1[38;5;166m1[38;5;166m1[38;5;130m1[38;5;130m1[38;5;95m1[38;5;145m0[38;5;231m0[38;5;231m0[38;5;145m0     [0m\n"
-    "          [38;5;231m0[38;5;231m0[38;5;231m0[38;5;174m1[38;5;209m0[38;5;214m0[38;5;221m0[38;5;222m0[38;5;221m0[38;5;215m0[38;5;215m0[38;5;222m0[38;5;221m0[38;5;208m0[38;5;130m1[38;5;60m1[38;5;60m1[38;5;66m1[38;5;24m1[38;5;95m1[38;5;208m0[38;5;208m0[38;5;214m0[38;5;221m0[38;5;102m1[38;5;102m1[38;5;152m0[38;5;188m0[38;5;188m0[38;5;102m1[38;5;59m1[38;5;59m1[38;5;59m1[38;5;101m1[38;5;59m1[38;5;59m1[38;5;59m1[38;5;60m1[38;5;188m0[38;5;231m0[38;5;231m0[38;5;231m0[38;5;188m0       [0m\n"
-    "         [38;5;231m0[38;5;231m0[38;5;231m0[38;5;173m1[38;5;209m0[38;5;208m1[38;5;208m1[38;5;172m1[38;5;166m1[38;5;130m1[38;5;172m1[38;5;208m0[38;5;172m1[38;5;166m1[38;5;95m1[38;5;60m1[38;5;24m1[38;5;24m1[38;5;24m1[38;5;95m1[38;5;172m0[38;5;214m0[38;5;221m0[38;5;101m1[38;5;102m1[38;5;145m0[38;5;152m0[38;5;152m0[38;5;188m0[38;5;223m0[38;5;222m0[38;5;222m0[38;5;221m0[38;5;221m0[38;5;179m0[38;5;178m0[38;5;179m0[38;5;66m1[38;5;189m0[38;5;231m0[38;5;188m0          [0m\n"
-    "         [38;5;231m0[38;5;231m0[38;5;188m0[38;5;181m0[38;5;181m0[38;5;181m0[38;5;188m0[38;5;231m0[38;5;188m0[38;5;173m1[38;5;174m1[38;5;138m1[38;5;59m1[38;5;24m1[38;5;66m1[38;5;145m0[38;5;67m1[38;5;24m1[38;5;59m1[38;5;65m1[38;5;59m1[38;5;60m1[38;5;145m0[38;5;152m0[38;5;152m0[38;5;188m0[38;5;187m0[38;5;222m0[38;5;222m0[38;5;222m0[38;5;222m0[38;5;221m0[38;5;179m0[38;5;178m0[38;5;178m0[38;5;101m1[38;5;103m1[38;5;231m0[38;5;231m0[38;5;188m0           [0m\n"
-    "           [38;5;231m0[38;5;231m0[38;5;231m0[38;5;188m0[38;5;145m0[38;5;188m0[38;5;231m0[38;5;231m0[38;5;231m0[38;5;231m0[38;5;231m0[38;5;145m0[38;5;23m1[38;5;24m1[38;5;66m1[38;5;103m1[38;5;109m0[38;5;151m0[38;5;187m0[38;5;187m0[38;5;186m0[38;5;222m0[38;5;222m0[38;5;221m0[38;5;221m0[38;5;221m0[38;5;221m0[38;5;179m0[38;5;179m0[38;5;178m0[38;5;137m0[38;5;95m1[38;5;102m1[38;5;231m0[38;5;231m0[38;5;231m0             [0m\n"
-    "                     [38;5;188m0[38;5;231m0[38;5;231m0[38;5;231m0[38;5;188m0[38;5;102m1[38;5;59m1[38;5;101m1[38;5;143m0[38;5;179m0[38;5;179m0[38;5;179m0[38;5;179m0[38;5;179m0[38;5;178m0[38;5;179m0[38;5;137m1[38;5;95m1[38;5;59m1[38;5;109m0[38;5;188m0[38;5;231m0[38;5;231m0[38;5;188m0               [0m\n"
-    "                        [38;5;188m0[38;5;231m0[38;5;231m0[38;5;231m0[38;5;231m0[38;5;231m0[38;5;231m0[38;5;188m0[38;5;188m0[38;5;188m0[38;5;188m0[38;5;188m0[38;5;231m0[38;5;231m0[38;5;231m0[38;5;231m0[38;5;231m0[38;5;188m0                  [0m\n"
-    "                                [38;5;145m0[38;5;188m0[38;5;145m0                         [0m\n"
-    "                                                            [0m\n"
-    "                    Built with ❤️ by Rocket!\n"
+    "                                                            \x1b[0m\n"
+    "                             \x1b[38;5;188m0\x1b[38;5;188m0\x1b[38;5;188m0\x1b[38;5;188m0                           \x1b[0m\n"
+    "          \x1b[38;5;231m0\x1b[38;5;231m0\x1b[38;5;231m0\x1b[38;5;231m0\x1b[38;5;231m0\x1b[38;5;231m0\x1b[38;5;188m0     \x1b[38;5;231m0\x1b[38;5;231m0\x1b[38;5;231m0\x1b[38;5;231m0\x1b[38;5;231m0\x1b[38;5;231m0\x1b[38;5;188m0\x1b[38;5;188m0\x1b[38;5;146m0\x1b[38;5;146m0\x1b[38;5;188m0\x1b[38;5;188m0\x1b[38;5;231m0\x1b[38;5;231m0\x1b[38;5;231m0\x1b[38;5;231m0\x1b[38;5;231m0\x1b[38;5;188m0 \x1b[38;5;188m0\x1b[38;5;231m0\x1b[38;5;231m0\x1b[38;5;231m0\x1b[38;5;231m0\x1b[38;5;230m0\x1b[38;5;188m0            \x1b[0m\n"
+    "         \x1b[38;5;231m0\x1b[38;5;188m0\x1b[38;5;103m1\x1b[38;5;188m0\x1b[38;5;188m0\x1b[38;5;145m0\x1b[38;5;145m0\x1b[38;5;188m0\x1b[38;5;231m0\x1b[38;5;231m0\x1b[38;5;231m0\x1b[38;5;231m0\x1b[38;5;231m0\x1b[38;5;231m0\x1b[38;5;145m0\x1b[38;5;102m1\x1b[38;5;101m1\x1b[38;5;144m0\x1b[38;5;186m0\x1b[38;5;222m0\x1b[38;5;222m0\x1b[38;5;222m0\x1b[38;5;222m0\x1b[38;5;222m0\x1b[38;5;223m0\x1b[38;5;187m0\x1b[38;5;144m0\x1b[38;5;102m1\x1b[38;5;102m1\x1b[38;5;146m0\x1b[38;5;188m0\x1b[38;5;188m0\x1b[38;5;188m0\x1b[38;5;146m0\x1b[38;5;145m0\x1b[38;5;145m0\x1b[38;5;146m0\x1b[38;5;188m0\x1b[38;5;188m0\x1b[38;5;231m0\x1b[38;5;231m0\x1b[38;5;231m0\x1b[38;5;231m0\x1b[38;5;188m0       \x1b[0m\n"
+    "        \x1b[38;5;231m0\x1b[38;5;231m0\x1b[38;5;102m1\x1b[38;5;172m1\x1b[38;5;102m1\x1b[38;5;188m0\x1b[38;5;102m1\x1b[38;5;95m1\x1b[38;5;172m1\x1b[38;5;179m0\x1b[38;5;102m1\x1b[38;5;231m0\x1b[38;5;188m0\x1b[38;5;59m1\x1b[38;5;24m1\x1b[38;5;24m1\x1b[38;5;24m1\x1b[38;5;24m1\x1b[38;5;60m1\x1b[38;5;102m1\x1b[38;5;180m0\x1b[38;5;222m0\x1b[38;5;222m0\x1b[38;5;222m0\x1b[38;5;222m0\x1b[38;5;222m0\x1b[38;5;185m0\x1b[38;5;101m1\x1b[38;5;23m1\x1b[38;5;66m1\x1b[38;5;73m1\x1b[38;5;110m0\x1b[38;5;110m0\x1b[38;5;66m1\x1b[38;5;180m0\x1b[38;5;222m0\x1b[38;5;222m0\x1b[38;5;222m0\x1b[38;5;222m0\x1b[38;5;221m0\x1b[38;5;215m0\x1b[38;5;137m1\x1b[38;5;102m1\x1b[38;5;231m0\x1b[38;5;231m0\x1b[38;5;231m0      \x1b[0m\n"
+    "        \x1b[38;5;231m0\x1b[38;5;231m0\x1b[38;5;145m0\x1b[38;5;130m1\x1b[38;5;172m1\x1b[38;5;173m1\x1b[38;5;102m1\x1b[38;5;145m0\x1b[38;5;102m1\x1b[38;5;95m1\x1b[38;5;143m0\x1b[38;5;143m0\x1b[38;5;59m1\x1b[38;5;24m1\x1b[38;5;24m1\x1b[38;5;109m0\x1b[38;5;188m0\x1b[38;5;109m1\x1b[38;5;24m1\x1b[38;5;24m1\x1b[38;5;66m1\x1b[38;5;24m1\x1b[38;5;66m1\x1b[38;5;101m1\x1b[38;5;59m1\x1b[38;5;67m1\x1b[38;5;110m0\x1b[38;5;116m0\x1b[38;5;110m0\x1b[38;5;74m0\x1b[38;5;74m0\x1b[38;5;74m0\x1b[38;5;74m1\x1b[38;5;74m1\x1b[38;5;67m1\x1b[38;5;59m1\x1b[38;5;178m0\x1b[38;5;214m0\x1b[38;5;214m0\x1b[38;5;214m0\x1b[38;5;214m0\x1b[38;5;214m0\x1b[38;5;172m1\x1b[38;5;102m1\x1b[38;5;231m0\x1b[38;5;231m0      \x1b[0m\n"
+    "         \x1b[38;5;231m0\x1b[38;5;231m0\x1b[38;5;102m1\x1b[38;5;94m1\x1b[38;5;166m1\x1b[38;5;166m1\x1b[38;5;172m1\x1b[38;5;172m1\x1b[38;5;172m0\x1b[38;5;172m0\x1b[38;5;173m0\x1b[38;5;173m1\x1b[38;5;95m1\x1b[38;5;24m1\x1b[38;5;24m1\x1b[38;5;24m1\x1b[38;5;24m1\x1b[38;5;24m1\x1b[38;5;59m1\x1b[38;5;95m1\x1b[38;5;59m1\x1b[38;5;59m1\x1b[38;5;110m0\x1b[38;5;110m0\x1b[38;5;74m0\x1b[38;5;74m1\x1b[38;5;67m1\x1b[38;5;66m1\x1b[38;5;66m1\x1b[38;5;66m1\x1b[38;5;66m1\x1b[38;5;67m1\x1b[38;5;67m1\x1b[38;5;74m1\x1b[38;5;74m1\x1b[38;5;65m1\x1b[38;5;178m0\x1b[38;5;214m0\x1b[38;5;214m0\x1b[38;5;214m0\x1b[38;5;214m0\x1b[38;5;131m1\x1b[38;5;145m0\x1b[38;5;231m0\x1b[38;5;188m0      \x1b[0m\n"
+    "          \x1b[38;5;231m0\x1b[38;5;231m0\x1b[38;5;188m0\x1b[38;5;102m1\x1b[38;5;131m1\x1b[38;5;130m1\x1b[38;5;130m1\x1b[38;5;166m1\x1b[38;5;166m1\x1b[38;5;166m1\x1b[38;5;95m1\x1b[38;5;95m1\x1b[38;5;101m1\x1b[38;5;101m1\x1b[38;5;173m0\x1b[38;5;172m1\x1b[38;5;94m1\x1b[38;5;94m1\x1b[38;5;173m1\x1b[38;5;95m1\x1b[38;5;137m1\x1b[38;5;67m1\x1b[38;5;74m1\x1b[38;5;74m1\x1b[38;5;24m1\x1b[38;5;66m1\x1b[38;5;107m0\x1b[38;5;150m0\x1b[38;5;150m0\x1b[38;5;150m0\x1b[38;5;65m1\x1b[38;5;24m1\x1b[38;5;67m1\x1b[38;5;74m1\x1b[38;5;67m1\x1b[38;5;59m1\x1b[38;5;214m0\x1b[38;5;214m0\x1b[38;5;208m0\x1b[38;5;172m1\x1b[38;5;102m1\x1b[38;5;231m0\x1b[38;5;231m0\x1b[38;5;188m0      \x1b[0m\n"
+    "            \x1b[38;5;230m0\x1b[38;5;231m0\x1b[38;5;231m0\x1b[38;5;145m0\x1b[38;5;24m1\x1b[38;5;24m1\x1b[38;5;23m1\x1b[38;5;101m1\x1b[38;5;137m1\x1b[38;5;59m1\x1b[38;5;59m1\x1b[38;5;59m1\x1b[38;5;59m1\x1b[38;5;17m1\x1b[38;5;24m1\x1b[38;5;59m1\x1b[38;5;100m1\x1b[38;5;59m1\x1b[38;5;67m1\x1b[38;5;74m1\x1b[38;5;74m1\x1b[38;5;67m1\x1b[38;5;24m1\x1b[38;5;65m1\x1b[38;5;107m0\x1b[38;5;107m0\x1b[38;5;107m0\x1b[38;5;113m0\x1b[38;5;107m0\x1b[38;5;24m1\x1b[38;5;67m1\x1b[38;5;74m1\x1b[38;5;74m1\x1b[38;5;67m1\x1b[38;5;95m1\x1b[38;5;208m0\x1b[38;5;172m1\x1b[38;5;66m1\x1b[38;5;231m0\x1b[38;5;231m0\x1b[38;5;188m0       \x1b[0m\n"
+    "             \x1b[38;5;231m0\x1b[38;5;231m0\x1b[38;5;66m1\x1b[38;5;24m1\x1b[38;5;59m1\x1b[38;5;101m1\x1b[38;5;95m1\x1b[38;5;59m1\x1b[38;5;59m1\x1b[38;5;137m1\x1b[38;5;172m1\x1b[38;5;59m1\x1b[38;5;31m1\x1b[38;5;24m1\x1b[38;5;66m1\x1b[38;5;102m1\x1b[38;5;66m1\x1b[38;5;67m1\x1b[38;5;74m0\x1b[38;5;74m0\x1b[38;5;74m0\x1b[38;5;31m1\x1b[38;5;24m1\x1b[38;5;30m1\x1b[38;5;65m1\x1b[38;5;65m1\x1b[38;5;59m1\x1b[38;5;30m1\x1b[38;5;24m1\x1b[38;5;74m1\x1b[38;5;74m1\x1b[38;5;67m1\x1b[38;5;31m1\x1b[38;5;60m1\x1b[38;5;59m1\x1b[38;5;145m0\x1b[38;5;231m0\x1b[38;5;231m0         \x1b[0m\n"
+    "            \x1b[38;5;231m0\x1b[38;5;231m0\x1b[38;5;231m0\x1b[38;5;60m1\x1b[38;5;24m1\x1b[38;5;67m1\x1b[38;5;67m1\x1b[38;5;24m1\x1b[38;5;24m1\x1b[38;5;24m1\x1b[38;5;24m1\x1b[38;5;59m1\x1b[38;5;144m0\x1b[38;5;221m0\x1b[38;5;214m0\x1b[38;5;214m0\x1b[38;5;214m0\x1b[38;5;137m1\x1b[38;5;67m1\x1b[38;5;74m0\x1b[38;5;74m0\x1b[38;5;74m0\x1b[38;5;74m0\x1b[38;5;74m1\x1b[38;5;67m1\x1b[38;5;30m1\x1b[38;5;24m1\x1b[38;5;31m1\x1b[38;5;67m1\x1b[38;5;74m1\x1b[38;5;67m1\x1b[38;5;67m1\x1b[38;5;67m1\x1b[38;5;30m1\x1b[38;5;59m1\x1b[38;5;95m1\x1b[38;5;145m0\x1b[38;5;188m0\x1b[38;5;188m0\x1b[38;5;231m0\x1b[38;5;231m0\x1b[38;5;231m0\x1b[38;5;231m0\x1b[38;5;188m0    \x1b[0m\n"
+    "            \x1b[38;5;188m0\x1b[38;5;231m0\x1b[38;5;231m0\x1b[38;5;60m1\x1b[38;5;24m1\x1b[38;5;60m1\x1b[38;5;60m1\x1b[38;5;59m1\x1b[38;5;95m1\x1b[38;5;59m1\x1b[38;5;143m0\x1b[38;5;214m0\x1b[38;5;214m0\x1b[38;5;208m0\x1b[38;5;208m0\x1b[38;5;172m1\x1b[38;5;59m1\x1b[38;5;31m1\x1b[38;5;74m1\x1b[38;5;74m0\x1b[38;5;74m0\x1b[38;5;74m1\x1b[38;5;67m1\x1b[38;5;59m1\x1b[38;5;59m1\x1b[38;5;66m1\x1b[38;5;67m1\x1b[38;5;31m1\x1b[38;5;31m1\x1b[38;5;31m1\x1b[38;5;31m1\x1b[38;5;24m1\x1b[38;5;101m1\x1b[38;5;179m0\x1b[38;5;101m1\x1b[38;5;179m0\x1b[38;5;166m1\x1b[38;5;95m1\x1b[38;5;145m0\x1b[38;5;188m0\x1b[38;5;95m1\x1b[38;5;138m0\x1b[38;5;231m0\x1b[38;5;231m0    \x1b[0m\n"
+    "            \x1b[38;5;231m0\x1b[38;5;231m0\x1b[38;5;181m0\x1b[38;5;173m1\x1b[38;5;179m0\x1b[38;5;209m0\x1b[38;5;215m0\x1b[38;5;221m0\x1b[38;5;221m0\x1b[38;5;179m0\x1b[38;5;95m1\x1b[38;5;59m1\x1b[38;5;59m1\x1b[38;5;60m1\x1b[38;5;24m1\x1b[38;5;31m1\x1b[38;5;74m1\x1b[38;5;74m1\x1b[38;5;74m0\x1b[38;5;74m0\x1b[38;5;74m1\x1b[38;5;66m1\x1b[38;5;101m1\x1b[38;5;131m1\x1b[38;5;137m1\x1b[38;5;95m1\x1b[38;5;59m1\x1b[38;5;31m1\x1b[38;5;24m1\x1b[38;5;60m1\x1b[38;5;180m0\x1b[38;5;143m0\x1b[38;5;101m1\x1b[38;5;101m1\x1b[38;5;95m1\x1b[38;5;95m1\x1b[38;5;23m1\x1b[38;5;145m0\x1b[38;5;137m1\x1b[38;5;173m0\x1b[38;5;130m1\x1b[38;5;138m1\x1b[38;5;231m0\x1b[38;5;231m0    \x1b[0m\n"
+    "          \x1b[38;5;230m0\x1b[38;5;231m0\x1b[38;5;231m0\x1b[38;5;181m0\x1b[38;5;174m0\x1b[38;5;173m1\x1b[38;5;215m0\x1b[38;5;215m0\x1b[38;5;221m0\x1b[38;5;222m0\x1b[38;5;215m0\x1b[38;5;208m0\x1b[38;5;208m0\x1b[38;5;136m1\x1b[38;5;66m1\x1b[38;5;73m1\x1b[38;5;30m1\x1b[38;5;24m1\x1b[38;5;31m1\x1b[38;5;31m1\x1b[38;5;31m1\x1b[38;5;31m1\x1b[38;5;31m1\x1b[38;5;24m1\x1b[38;5;59m1\x1b[38;5;59m1\x1b[38;5;52m1\x1b[38;5;94m1\x1b[38;5;137m1\x1b[38;5;102m1\x1b[38;5;152m0\x1b[38;5;187m0\x1b[38;5;101m1\x1b[38;5;173m0\x1b[38;5;173m0\x1b[38;5;173m0\x1b[38;5;173m0\x1b[38;5;173m1\x1b[38;5;172m1\x1b[38;5;173m1\x1b[38;5;166m1\x1b[38;5;130m1\x1b[38;5;95m1\x1b[38;5;188m0\x1b[38;5;231m0\x1b[38;5;188m0    \x1b[0m\n"
+    "         \x1b[38;5;231m0\x1b[38;5;231m0\x1b[38;5;231m0\x1b[38;5;174m1\x1b[38;5;173m0\x1b[38;5;172m1\x1b[38;5;172m0\x1b[38;5;215m0\x1b[38;5;221m0\x1b[38;5;222m0\x1b[38;5;215m0\x1b[38;5;215m0\x1b[38;5;215m0\x1b[38;5;215m0\x1b[38;5;215m0\x1b[38;5;215m0\x1b[38;5;95m1\x1b[38;5;23m1\x1b[38;5;24m1\x1b[38;5;23m1\x1b[38;5;59m1\x1b[38;5;137m1\x1b[38;5;136m1\x1b[38;5;172m1\x1b[38;5;214m0\x1b[38;5;220m0\x1b[38;5;138m1\x1b[38;5;103m1\x1b[38;5;95m1\x1b[38;5;130m1\x1b[38;5;95m1\x1b[38;5;101m1\x1b[38;5;101m1\x1b[38;5;143m0\x1b[38;5;95m1\x1b[38;5;166m1\x1b[38;5;166m1\x1b[38;5;166m1\x1b[38;5;166m1\x1b[38;5;130m1\x1b[38;5;130m1\x1b[38;5;95m1\x1b[38;5;145m0\x1b[38;5;231m0\x1b[38;5;231m0\x1b[38;5;145m0     \x1b[0m\n"
+    "          \x1b[38;5;231m0\x1b[38;5;231m0\x1b[38;5;231m0\x1b[38;5;174m1\x1b[38;5;209m0\x1b[38;5;214m0\x1b[38;5;221m0\x1b[38;5;222m0\x1b[38;5;221m0\x1b[38;5;215m0\x1b[38;5;215m0\x1b[38;5;222m0\x1b[38;5;221m0\x1b[38;5;208m0\x1b[38;5;130m1\x1b[38;5;60m1\x1b[38;5;60m1\x1b[38;5;66m1\x1b[38;5;24m1\x1b[38;5;95m1\x1b[38;5;208m0\x1b[38;5;208m0\x1b[38;5;214m0\x1b[38;5;221m0\x1b[38;5;102m1\x1b[38;5;102m1\x1b[38;5;152m0\x1b[38;5;188m0\x1b[38;5;188m0\x1b[38;5;102m1\x1b[38;5;59m1\x1b[38;5;59m1\x1b[38;5;59m1\x1b[38;5;101m1\x1b[38;5;59m1\x1b[38;5;59m1\x1b[38;5;59m1\x1b[38;5;60m1\x1b[38;5;188m0\x1b[38;5;231m0\x1b[38;5;231m0\x1b[38;5;231m0\x1b[38;5;188m0       \x1b[0m\n"
+    "         \x1b[38;5;231m0\x1b[38;5;231m0\x1b[38;5;231m0\x1b[38;5;173m1\x1b[38;5;209m0\x1b[38;5;208m1\x1b[38;5;208m1\x1b[38;5;172m1\x1b[38;5;166m1\x1b[38;5;130m1\x1b[38;5;172m1\x1b[38;5;208m0\x1b[38;5;172m1\x1b[38;5;166m1\x1b[38;5;95m1\x1b[38;5;60m1\x1b[38;5;24m1\x1b[38;5;24m1\x1b[38;5;24m1\x1b[38;5;95m1\x1b[38;5;172m0\x1b[38;5;214m0\x1b[38;5;221m0\x1b[38;5;101m1\x1b[38;5;102m1\x1b[38;5;145m0\x1b[38;5;152m0\x1b[38;5;152m0\x1b[38;5;188m0\x1b[38;5;223m0\x1b[38;5;222m0\x1b[38;5;222m0\x1b[38;5;221m0\x1b[38;5;221m0\x1b[38;5;179m0\x1b[38;5;178m0\x1b[38;5;179m0\x1b[38;5;66m1\x1b[38;5;189m0\x1b[38;5;231m0\x1b[38;5;188m0          \x1b[0m\n"
+    "         \x1b[38;5;231m0\x1b[38;5;231m0\x1b[38;5;188m0\x1b[38;5;181m0\x1b[38;5;181m0\x1b[38;5;181m0\x1b[38;5;188m0\x1b[38;5;231m0\x1b[38;5;188m0\x1b[38;5;173m1\x1b[38;5;174m1\x1b[38;5;138m1\x1b[38;5;59m1\x1b[38;5;24m1\x1b[38;5;66m1\x1b[38;5;145m0\x1b[38;5;67m1\x1b[38;5;24m1\x1b[38;5;59m1\x1b[38;5;65m1\x1b[38;5;59m1\x1b[38;5;60m1\x1b[38;5;145m0\x1b[38;5;152m0\x1b[38;5;152m0\x1b[38;5;188m0\x1b[38;5;187m0\x1b[38;5;222m0\x1b[38;5;222m0\x1b[38;5;222m0\x1b[38;5;222m0\x1b[38;5;221m0\x1b[38;5;179m0\x1b[38;5;178m0\x1b[38;5;178m0\x1b[38;5;101m1\x1b[38;5;103m1\x1b[38;5;231m0\x1b[38;5;231m0\x1b[38;5;188m0           \x1b[0m\n"
+    "           \x1b[38;5;231m0\x1b[38;5;231m0\x1b[38;5;231m0\x1b[38;5;188m0\x1b[38;5;145m0\x1b[38;5;188m0\x1b[38;5;231m0\x1b[38;5;231m0\x1b[38;5;231m0\x1b[38;5;231m0\x1b[38;5;231m0\x1b[38;5;145m0\x1b[38;5;23m1\x1b[38;5;24m1\x1b[38;5;66m1\x1b[38;5;103m1\x1b[38;5;109m0\x1b[38;5;151m0\x1b[38;5;187m0\x1b[38;5;187m0\x1b[38;5;186m0\x1b[38;5;222m0\x1b[38;5;222m0\x1b[38;5;221m0\x1b[38;5;221m0\x1b[38;5;221m0\x1b[38;5;221m0\x1b[38;5;179m0\x1b[38;5;179m0\x1b[38;5;178m0\x1b[38;5;137m0\x1b[38;5;95m1\x1b[38;5;102m1\x1b[38;5;231m0\x1b[38;5;231m0\x1b[38;5;231m0             \x1b[0m\n"
+    "                     \x1b[38;5;188m0\x1b[38;5;231m0\x1b[38;5;231m0\x1b[38;5;231m0\x1b[38;5;188m0\x1b[38;5;102m1\x1b[38;5;59m1\x1b[38;5;101m1\x1b[38;5;143m0\x1b[38;5;179m0\x1b[38;5;179m0\x1b[38;5;179m0\x1b[38;5;179m0\x1b[38;5;179m0\x1b[38;5;178m0\x1b[38;5;179m0\x1b[38;5;137m1\x1b[38;5;95m1\x1b[38;5;59m1\x1b[38;5;109m0\x1b[38;5;188m0\x1b[38;5;231m0\x1b[38;5;231m0\x1b[38;5;188m0               \x1b[0m\n"
+    "                        \x1b[38;5;188m0\x1b[38;5;231m0\x1b[38;5;231m0\x1b[38;5;231m0\x1b[38;5;231m0\x1b[38;5;231m0\x1b[38;5;231m0\x1b[38;5;188m0\x1b[38;5;188m0\x1b[38;5;188m0\x1b[38;5;188m0\x1b[38;5;231m0\x1b[38;5;231m0\x1b[38;5;231m0\x1b[38;5;231m0\x1b[38;5;231m0\x1b[38;5;188m0                  \x1b[0m\n"
+    "                                \x1b[38;5;145m0\x1b[38;5;188m0\x1b[38;5;145m0                         \x1b[0m\n"
+    "                                                            \x1b[0m\n"
+    "                    Built with \xe2\x9d\xa4\xef\xb8\x8f by Rocket!\n"
     ;
     writeUtf8ToConsole(m_hConsole, ascii_art);
     writeUtf8ToConsole(m_hConsole, "\n");
@@ -1015,7 +1001,6 @@ const char* ascii_art =
             printPrompt();
             std::string line;
             if (!std::getline(std::cin, line)) {
-                // EOF reached
                 writeUtf8ToConsole(m_hConsole, "\n");
                 break;
             }

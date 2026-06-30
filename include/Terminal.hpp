@@ -45,6 +45,7 @@ private:
 
     // --- Line processing (shared between raw/cooked loops) ---
     void processLine(const std::string& line);
+    bool runTuiCommandIfAny(const std::string& line);
 
     // --- External command execution ---
     int runExternalCommand(const CommandResolver::ResolutionResult& resolved);

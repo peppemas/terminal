@@ -265,6 +265,7 @@ void waitForKeyAndHandle(PagerState& state) {
             break;
         }
         if (record.EventType != KEY_EVENT || !record.Event.KeyEvent.bKeyDown) {
+            erasePromptRow(state.output);   // wipe the just-printed --More-- before retrying
             continue;
         }
 
