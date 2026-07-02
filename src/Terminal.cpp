@@ -833,6 +833,21 @@ int Terminal::runExternalCommand(const CommandResolver::ResolutionResult& resolv
     g_interruptRequested = false;
     restoreRawInput();
 
+    // Ensure DISABLE_NEWLINE_AUTO_RETURN (0x0008) is cleared on the output
+    // handle before the child process starts. If a previous TUI session
+    // (e.g. bc/FTXUI) left this flag set, the child's '\n' characters would
+    // be raw LF (no CR), causing every output line to be offset to the right
+    // (the staircase bug). We clear the flag here so external programs
+    // inherit a clean console output mode.
+    if (m_hConsole != INVALID_HANDLE_VALUE) {
+        constexpr DWORD kDisableNewlineAutoReturn = 0x0008;
+        DWORD currentOutputMode = 0;
+        if (GetConsoleMode(m_hConsole, &currentOutputMode) &&
+            (currentOutputMode & kDisableNewlineAutoReturn)) {
+            SetConsoleMode(m_hConsole, currentOutputMode & ~kDisableNewlineAutoReturn);
+        }
+    }
+
     while (m_fgJob.isActive()) {
         DWORD wait = WaitForSingleObject(m_fgJob.hProcess, 100);
         if (wait != WAIT_TIMEOUT) {
@@ -895,6 +910,20 @@ bool Terminal::runTuiCommandIfAny(const std::string& line)
     m_lastWasTab = false;
     m_inHistoryRecall = false;
     m_historyIndex = 0;
+
+    // Defense-in-depth: explicitly restore the output console mode to the
+    // shell's known-good state. TuiScreen::exitScreen() already does this,
+    // but we repeat it here to guard against any future changes in the
+    // TuiScreen lifetime or bc's own output after the TUI exits.
+    // DISABLE_NEWLINE_AUTO_RETURN (0x0008) must NOT be set when external
+    // programs run, or their '\n' will be raw LF (staircase bug).
+    if (m_hConsole != INVALID_HANDLE_VALUE && m_vtEnabled) {
+        constexpr DWORD kDisableNewlineAutoReturn = 0x0008;
+        DWORD currentMode = 0;
+        if (GetConsoleMode(m_hConsole, &currentMode)) {
+            SetConsoleMode(m_hConsole, currentMode & ~kDisableNewlineAutoReturn);
+        }
+    }
 
     // CR (\r) -> column 1, EL (\x1b[K) -> erase to end of line. This
     // guarantees the prompt is drawn on a clean line regardless of where
